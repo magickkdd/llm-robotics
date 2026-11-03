@@ -20,6 +20,7 @@ from inspect_robots_agent.policy import agent_policy
 from encode_rollout_frames import encode_frames
 from inspect_robots_libero.budget import PRICING, BudgetTransport, wire_for
 from inspect_robots_libero.ur20_embodiment import UR20ScrewEmbodiment
+from ur20_tui import UR20Dashboard
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = {"luna": ("OPENAI_API_KEY_LUNA", "OPENAI_BASE_URL_LUNA"),
@@ -99,6 +100,9 @@ class LiveConsole:
             self.pending = ""
         self.stream.flush()
 
+    def close(self):
+        self.flush()
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -110,6 +114,7 @@ def main() -> None:
     parser.add_argument("--max-output-tokens", type=int, default=8192)
     parser.add_argument("--request-timeout", type=float, default=300)
     parser.add_argument("--prior-learnings", type=Path)
+    parser.add_argument("--tui", action="store_true", help="use the experimental live dashboard")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--execute-paid-rollouts", action="store_true", required=True)
     args = parser.parse_args()
@@ -146,20 +151,19 @@ def main() -> None:
         f"ur20-screw-init{args.state_id:02d}",
         "Remove the M6 external-hex screw from the battery. Align and seat the socket on the hex head, then rotate counterclockwise when viewed from above until the screw is extracted.")],
         scorer="success_at_end", max_steps=args.max_steps)
+    original_stderr = sys.stderr
+    console = UR20Dashboard(original_stderr) if args.tui else LiveConsole(original_stderr)
+    sys.stderr = console
     try:
         print(f"[UR20] model={args.model} state={args.state_id:02d} "
               f"limits={args.max_calls} calls/{args.max_steps} sim steps "
               f"output={args.output}", file=sys.stderr, flush=True)
-        original_stderr = sys.stderr
-        sys.stderr = LiveConsole(original_stderr)
-        try:
-            log, = evaluate(task, policy, embodiment, log_dir=str(args.output / "inspect"),
-                            store_frames=True, store_actions=True,
-                            approver=ChainApprover(ClampApprover(embodiment.info.action_space),
-                                                   DeltaLimitApprover(embodiment.info.action_space)))
-        finally:
-            sys.stderr.flush()
-            sys.stderr = original_stderr
+        log, = evaluate(task, policy, embodiment, log_dir=str(args.output / "inspect"),
+                        store_frames=True, store_actions=True,
+                        approver=ChainApprover(ClampApprover(embodiment.info.action_space),
+                                               DeltaLimitApprover(embodiment.info.action_space)))
+        if args.tui:
+            console.finish(embodiment.task_success)
         frame_dirs = sorted((args.output / "inspect" / "frames").glob("*"))
         frame_dir = next((path for path in frame_dirs if list(path.glob("*_agentview_*.npy"))), None)
         video_path = args.output / "rollout.mp4"
@@ -186,6 +190,9 @@ def main() -> None:
               f"{LiveConsole.COLORS['reset'] if sys.stdout.isatty() else ''}")
         print(json.dumps(summary, indent=2))
     finally:
+        sys.stderr.flush()
+        sys.stderr = original_stderr
+        console.close()
         embodiment.close()
         policy._client.close()
         transport.dispose()
