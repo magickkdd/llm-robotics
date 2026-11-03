@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import textwrap
 from pathlib import Path
 
 import httpx
@@ -24,6 +25,79 @@ ROOT = Path(__file__).resolve().parents[1]
 PROFILES = {"luna": ("OPENAI_API_KEY_LUNA", "OPENAI_BASE_URL_LUNA"),
             "terra": ("OPENAI_API_KEY_TERRA", "OPENAI_BASE_URL_TERRA"),
             "deepseek": ("OPENAI_API_KEY_DEEPSEEK", "OPENAI_BASE_URL_DEEPSEEK")}
+
+
+class LiveConsole:
+    COLORS = {"reset": "\033[0m", "cyan": "\033[36m", "green": "\033[32m",
+              "yellow": "\033[33m", "magenta": "\033[35m", "red": "\033[31m",
+              "dim": "\033[2m", "bold": "\033[1m"}
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.tty = stream.isatty()
+        self.pending = ""
+
+    @property
+    def encoding(self):
+        return self.stream.encoding
+
+    def isatty(self):
+        return self.tty
+
+    def fileno(self):
+        return self.stream.fileno()
+
+    def _paint(self, text, color):
+        if not self.tty:
+            return text
+        return f"{self.COLORS[color]}{text}{self.COLORS['reset']}"
+
+    def _emit(self, line):
+        if line.startswith("[agent] << tool_call "):
+            payload = line[len("[agent] << tool_call "):]
+            name, separator, raw_arguments = payload.partition("(")
+            try:
+                arguments = json.loads(raw_arguments[:-1]) if separator and raw_arguments.endswith(")") else {}
+            except json.JSONDecodeError:
+                arguments = {}
+            targets = arguments.get("targets", {})
+            target_text = ", ".join(f"{key}={value}" for key, value in targets.items())
+            self.stream.write(self._paint(f"  ACTION  {name}  {target_text}\n", "yellow"))
+            note = arguments.get("note")
+            if note:
+                width = 112 if self.tty else 160
+                wrapped = textwrap.fill(note, width=width, initial_indent="          ",
+                                        subsequent_indent="          ")
+                self.stream.write(self._paint(wrapped + "\n", "dim"))
+            return
+        if line.startswith("[agent] -- "):
+            self.stream.write(self._paint(f"  EXEC    {line[len('[agent] -- '):]}\n", "magenta"))
+            return
+        if line.startswith("[agent] << "):
+            self.stream.write(self._paint(f"  POLICY  {line[len('[agent] << '):]}\n", "magenta"))
+            return
+        if line.startswith("[episode "):
+            color = "red" if any(word in line.lower() for word in ("error", "stopping", "exhausted")) else "cyan"
+            self.stream.write(self._paint(f"  API     {line}\n", color))
+            return
+        if line.startswith("[UR20 step "):
+            self.stream.write(self._paint(f"  SIM     {line}\n", "green"))
+            return
+        self.stream.write(line + "\n")
+        self.stream.flush()
+
+    def write(self, text):
+        self.pending += text
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            self._emit(line)
+        return len(text)
+
+    def flush(self):
+        if self.pending:
+            self._emit(self.pending)
+            self.pending = ""
+        self.stream.flush()
 
 
 def main() -> None:
@@ -70,16 +144,22 @@ def main() -> None:
     policy._client._http.timeout = httpx.Timeout(args.request_timeout, connect=10.0)
     task = Task(name="ur20_battery_disassembly", scenes=[Scene(
         f"ur20-screw-init{args.state_id:02d}",
-        "Remove the M6 external-hex screw from the battery. Align and seat the socket on the hex head, then turn in the loosening direction until the screw is extracted.")],
+        "Remove the M6 external-hex screw from the battery. Align and seat the socket on the hex head, then rotate counterclockwise when viewed from above until the screw is extracted.")],
         scorer="success_at_end", max_steps=args.max_steps)
     try:
         print(f"[UR20] model={args.model} state={args.state_id:02d} "
               f"limits={args.max_calls} calls/{args.max_steps} sim steps "
               f"output={args.output}", file=sys.stderr, flush=True)
-        log, = evaluate(task, policy, embodiment, log_dir=str(args.output / "inspect"),
-                        store_frames=True, store_actions=True,
-                        approver=ChainApprover(ClampApprover(embodiment.info.action_space),
-                                               DeltaLimitApprover(embodiment.info.action_space)))
+        original_stderr = sys.stderr
+        sys.stderr = LiveConsole(original_stderr)
+        try:
+            log, = evaluate(task, policy, embodiment, log_dir=str(args.output / "inspect"),
+                            store_frames=True, store_actions=True,
+                            approver=ChainApprover(ClampApprover(embodiment.info.action_space),
+                                                   DeltaLimitApprover(embodiment.info.action_space)))
+        finally:
+            sys.stderr.flush()
+            sys.stderr = original_stderr
         frame_dirs = sorted((args.output / "inspect" / "frames").glob("*"))
         frame_dir = next((path for path in frame_dirs if list(path.glob("*_agentview_*.npy"))), None)
         video_path = args.output / "rollout.mp4"
@@ -100,7 +180,11 @@ def main() -> None:
                    "video": str(video_path) if video_path.is_file() else None,
                    "output": str(args.output)}
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2))
-        print(json.dumps(summary))
+        status_color = "green" if embodiment.task_success else "red"
+        print(f"\n{LiveConsole.COLORS[status_color] if sys.stdout.isatty() else ''}"
+              f"{'SUCCESS' if embodiment.task_success else 'TASK FAILURE'}"
+              f"{LiveConsole.COLORS['reset'] if sys.stdout.isatty() else ''}")
+        print(json.dumps(summary, indent=2))
     finally:
         embodiment.close()
         policy._client.close()
