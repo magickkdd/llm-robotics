@@ -1,0 +1,56 @@
+<mujoco model="battery_screw_scene">
+  <compiler angle="radian" meshdir="meshes" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <asset>
+    <mesh name="end_effector_body" file="end_effector_body.stl"/>
+    <mesh name="socket_ns10la" file="socket_ns10la.stl"/>
+    <mesh name="battery" file="battery.stl"/>
+    <mesh name="screw_m6" file="screw_m6.stl"/>
+
+    <material name="metal" rgba="0.72 0.74 0.78 1" specular="0.35" shininess="0.6"/>
+    <material name="battery" rgba="0.24 0.42 0.62 1" specular="0.25" shininess="0.4"/>
+    <material name="steel" rgba="0.78 0.79 0.82 1" specular="0.5" shininess="0.7"/>
+    <material name="floor" rgba="0.30 0.31 0.34 1" specular="0.1" shininess="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light name="key" pos="1.5 -1 2" dir="-1 1 -1" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <light name="fill" pos="-1 -1 1.5" dir="1 1 -1" diffuse="0.35 0.35 0.4"/>
+    <geom name="floor" type="plane" size="3 3 0.1" material="floor" contype="2" conaffinity="3"/>
+
+    <body name="battery" pos="0 0 0">
+      <include file="parts/battery_body.xml"/>
+    </body>
+
+    <!-- 被拧的 M6 螺钉：焊在电池顶面（演示用；去掉 weld 后即为自由刚体） -->
+    <body name="screw_m6" pos="0.3 0 0.273">
+      <freejoint name="screw_free"/>
+      <include file="parts/screw_m6_body.xml"/>
+    </body>
+
+    <!-- 工具安装位：模拟机器人腕部；这里让工具沿 -Z 朝下，套筒尖端悬在螺钉头上方约 8 mm -->
+    <body name="end_effector" pos="0.3 0 0.80" quat="0.7071068 0 0.7071068 0">
+      <include file="parts/end_effector_body.xml"/>
+    </body>
+
+    <camera name="cam" pos="1.05 -0.85 0.85"
+            xyaxes="0.749838 0.661622 0  -0.220159 0.249513 0.943013"/>
+    <camera name="cam_close" pos="0.55 -0.28 0.45" mode="targetbody" target="screw_m6"/>
+    <camera name="cam_wide" pos="1.5 -1.35 1.25"
+            xyaxes="0.733761 0.679408 0  -0.270918 0.292591 0.917057"/>
+  </worldbody>
+
+  <equality>
+    <weld name="screw_weld" body1="battery" body2="screw_m6" relpose="0.3 0 0.273 1 0 0 0"/>
+  </equality>
+
+  <actuator>
+    <velocity name="socket_velocity" joint="socket_joint" kv="0.5" ctrlrange="-100 100"/>
+  </actuator>
+
+  <statistic center="0.25 0 0.45" extent="1.1"/>
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+  </visual>
+</mujoco>

@@ -1,0 +1,19 @@
+<body name="screw_m6_parts">
+  <!-- 零件片段：include 时根 body 被剥掉，内容合并到外层 body。
+       本片段不带任何关节，由外层 body 按用途声明：
+       自由刚体用 freejoint；螺旋副旋出用 hinge + slide + equality 耦合。 -->
+
+  <!-- 8 g 按 M6x21 钢螺钉估算；质心在头部一侧 -->
+  <inertial pos="0 0 0.01342" mass="0.008" diaginertia="2.96e-7 2.96e-7 1.29e-7"/>
+
+  <!-- 视觉网格：尖端 z=0，六角头/法兰在 z=0.015..0.021 -->
+  <geom name="screw_visual" type="mesh" mesh="screw_m6" material="steel"
+        contype="0" conaffinity="0" group="2"/>
+
+  <geom name="screw_shank" type="cylinder" size="0.003 0.0075" pos="0 0 0.0075"
+        group="3" condim="4" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
+  <geom name="screw_flange" type="cylinder" size="0.010 0.001" pos="0 0 0.016"
+        group="3" condim="4" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
+  <geom name="screw_head" type="mesh" mesh="screw_hex_head" group="3" condim="4"
+        friction="1 0.02 0.01" contype="2" conaffinity="3"/>
+</body>

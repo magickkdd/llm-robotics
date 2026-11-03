@@ -1,0 +1,29 @@
+<mujoco model="screw_m6">
+  <compiler angle="radian" meshdir="meshes" autolimits="true"/>
+  <option timestep="0.002"/>
+
+  <asset>
+    <mesh name="screw_m6" file="screw_m6.stl"/>
+    <material name="steel" rgba="0.78 0.79 0.82 1" specular="0.5" shininess="0.7"/>
+    <material name="floor" rgba="0.30 0.31 0.34 1" specular="0.1" shininess="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light name="key" pos="0.2 -0.2 0.3" dir="-1 1 -1" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <light name="fill" pos="-0.2 -0.2 0.2" dir="1 1 -1" diffuse="0.35 0.35 0.4"/>
+    <geom name="floor" type="plane" size="0.5 0.5 0.02" material="floor" contype="2" conaffinity="3"/>
+
+    <!-- 单件预览时把螺钉横放在地面上；实际使用可改回竖直/挂到目标 body 下 -->
+    <body name="screw_m6" pos="0 0 0.012" quat="0.7071068 0 0.7071068 0">
+      <freejoint name="screw_free"/>
+      <include file="parts/screw_m6_body.xml"/>
+    </body>
+
+    <camera name="cam" pos="0.07 -0.06 0.04" mode="targetbodycom" target="screw_m6"/>
+  </worldbody>
+
+  <statistic center="0.01 0 0.012" extent="0.12"/>
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+  </visual>
+</mujoco>

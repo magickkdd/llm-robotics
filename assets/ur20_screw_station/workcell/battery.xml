@@ -1,0 +1,25 @@
+<mujoco model="battery">
+  <compiler angle="radian" meshdir="meshes" autolimits="true"/>
+  <option timestep="0.002"/>
+
+  <asset>
+    <mesh name="battery" file="battery.stl"/>
+    <material name="battery" rgba="0.24 0.42 0.62 1" specular="0.25" shininess="0.4"/>
+    <material name="floor" rgba="0.30 0.31 0.34 1" specular="0.1" shininess="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light name="key" pos="1.5 -1 2" dir="-1 1 -1" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <light name="fill" pos="-1 -1 1.5" dir="1 1 -1" diffuse="0.35 0.35 0.4"/>
+    <geom name="floor" type="plane" size="3 3 0.1" material="floor" contype="2" conaffinity="3"/>
+    <body name="battery" pos="0 0 0">
+      <include file="parts/battery_body.xml"/>
+    </body>
+    <camera name="cam" pos="1.3 -1.0 0.9" mode="targetbodycom" target="battery"/>
+  </worldbody>
+
+  <statistic center="0 0 0.14" extent="1.0"/>
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+  </visual>
+</mujoco>

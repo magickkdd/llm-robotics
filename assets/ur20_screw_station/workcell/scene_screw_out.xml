@@ -1,0 +1,72 @@
+<mujoco model="screw_out">
+  <compiler angle="radian" meshdir="meshes" autolimits="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <asset>
+    <mesh name="end_effector_body" file="end_effector_body.stl"/>
+    <mesh name="socket_ns10la" file="socket_ns10la.stl"/>
+    <mesh name="battery" file="battery.stl"/>
+    <mesh name="screw_m6" file="screw_m6.stl"/>
+    <mesh name="screw_hex_head" file="screw_hex_head.stl"/>
+
+    <material name="metal" rgba="0.72 0.74 0.78 1" specular="0.35" shininess="0.6"/>
+    <material name="battery" rgba="0.24 0.42 0.62 1" specular="0.25" shininess="0.4"/>
+    <material name="steel" rgba="0.78 0.79 0.82 1" specular="0.5" shininess="0.7"/>
+    <material name="floor" rgba="0.30 0.31 0.34 1" specular="0.1" shininess="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light name="key" pos="1.5 -1 2" dir="-1 1 -1" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <light name="fill" pos="-1 -1 1.5" dir="1 1 -1" diffuse="0.35 0.35 0.4"/>
+    <geom name="floor" type="plane" size="3 3 0.1" material="floor" contype="2" conaffinity="3"/>
+
+    <body name="battery" pos="0 0 0">
+      <include file="parts/battery_body.xml"/>
+    </body>
+
+    <!-- M6 螺钉：机身原点在杆端 z=0，法兰/六角头在 z=0.016/0.021。
+         电池主体顶面在螺钉位置的实际高度是 0.148（0.273 是后侧凸边），
+         故 z=0.132 时螺纹段 15 mm 全埋进电池，法兰压在 0.148 的顶面上。 -->
+    <body name="screw_m6" pos="0.3 0 0.132">
+      <!-- 螺旋副 = 绕 z 的转动 + 沿 z 的平移，两者由 equality 按螺距耦合。
+           armature 是数值正则化：螺钉只有 8 g，不加会让约束刚度太低、旋出量偏小。 -->
+      <joint name="screw_spin" type="hinge" axis="0 0 1" damping="0.005" armature="0.01"/>
+      <joint name="screw_lift" type="slide" axis="0 0 1" damping="0.005" armature="0.05"/>
+      <include file="parts/screw_m6_body.xml"/>
+    </body>
+
+    <!-- 工具：模拟机器人腕部，沿 -Z 朝下；套筒从六角头上方接近。
+         只保留竖直方向的滑动自由度，用来吃掉螺钉旋出时的高度变化。
+         gravcomp=1 表示腕部重力补偿（真机由机械臂承担工具自重）；
+         否则 4 kg 自重会把螺旋副这条软约束压出数百毫米的偏置。 -->
+    <body name="end_effector" pos="0.3 0 0.6464" quat="0.7071068 0 0.7071068 0" gravcomp="1">
+      <joint name="tool_lift" type="slide" axis="-1 0 0" damping="0.1"/>
+      <include file="parts/end_effector_body.xml"/>
+    </body>
+
+    <camera name="cam" pos="0.62 -0.26 0.30" mode="targetbody" target="screw_m6"/>
+    <camera name="cam_wide" pos="1.5 -1.35 1.1"
+            xyaxes="0.733761 0.679408 0  -0.270918 0.292591 0.917057"/>
+  </worldbody>
+
+  <equality>
+    <!-- 螺旋副：M6 粗牙螺距 1.0 mm => 每弧度进给 1.59155e-4 m。 -->
+    <joint name="screw_helix" joint1="screw_lift" joint2="screw_spin"
+           polycoef="0 1.59155e-4 0 0 0" solref="0.004 1"/>
+  </equality>
+
+  <contact>
+    <!-- 螺钉杆初始埋入电池，螺旋副负责螺钉轴向运动。工具和套筒仍须与工件发生碰撞。 -->
+    <exclude body1="battery" body2="screw_m6"/>
+  </contact>
+
+  <!-- ctrl 为负 = 从 +Z 俯视逆时针旋出；ctrl 为正 = 旋入。 -->
+  <actuator>
+    <velocity name="socket_velocity" joint="socket_joint" kv="0.5" ctrlrange="-60 60"/>
+  </actuator>
+
+  <statistic center="0.28 0 0.30" extent="0.9"/>
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+  </visual>
+</mujoco>
