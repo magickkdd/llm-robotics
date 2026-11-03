@@ -1,0 +1,50 @@
+{
+  "protocol": {
+    "model": "openai/gpt-6.1-sol",
+    "suite": "libero_spatial",
+    "wire": "responses",
+    "api_base_url": "https://max2.jojocode.com",
+    "task_id": 0,
+    "task_name": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate",
+    "instruction": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+    "episodes": 1,
+    "initial_state_ids": [
+      0
+    ],
+    "env_seeds": [
+      142
+    ],
+    "max_steps": 900,
+    "max_api_attempts_per_episode": 40,
+    "reasoning_effort": null,
+    "image_horizon": 2,
+    "max_output_tokens": 8192,
+    "request_timeout_s": 300.0,
+    "total_budget": 100000.0,
+    "episode_budget": 100000.0,
+    "zero_shot": true,
+    "task_notes": false,
+    "demonstrations": false,
+    "prior_learnings": null,
+    "upstream_commit": "4d35fe4b81a643c0e61e8d287810b3c26f9d386a",
+    "budget_note": "Conservative local reservations; provider billing remains authoritative."
+  },
+  "results": [
+    {
+      "episode": 0,
+      "scene": "libero_spatial_task00_init00",
+      "status": "api_error_usage_unknown",
+      "environment_success": false,
+      "framework_status": "error",
+      "metrics": {},
+      "steps": 0,
+      "api_attempts": 1,
+      "estimated_usd": 0.0,
+      "budget_charge_usd": 0.1512,
+      "stop_detail": null,
+      "video": "/home/czx/LLM_LIBERO/outputs/sol_luna_spatial_task00_40calls_20261103_120906/sol/episode_00/20261103-120955_task00_init00/rollout.mp4"
+    }
+  ],
+  "total_estimated_usd": 0.0,
+  "total_budget_charge_usd": 0.1512
+}

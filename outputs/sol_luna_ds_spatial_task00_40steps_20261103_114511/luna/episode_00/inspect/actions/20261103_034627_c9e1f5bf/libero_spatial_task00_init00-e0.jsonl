@@ -1,0 +1,1 @@
+{"kind": "header", "run_id": "20261103_034627_c9e1f5bf", "scene_id": "libero_spatial_task00_init00", "epoch": 0, "action_dim": 10, "labels": ["x", "y", "z", "r00", "r10", "r20", "r01", "r11", "r21", "gripper"]}

@@ -1,0 +1,2 @@
+{"task_id": 0, "episode": 0, "time": 1793679015.5616975, "event": "request_started", "call": 1, "reservation_usd": 0.1512, "input_token_reservation": 27712, "output_token_cap": 8192, "images": 2, "sha256": "6b7d349cd8710dbd6f012d0e9aba231815dfad27f98fb47dddd23bd654047951"}
+{"task_id": 0, "episode": 0, "time": 1793679025.9272027, "event": "usage_unknown", "call": 1, "reserved_usd": 0.1512, "latency_s": 10.364677915000357, "error_type": "ConnectTimeout"}

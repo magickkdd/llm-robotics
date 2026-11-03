@@ -1,0 +1,16 @@
+<body name="battery_parts">
+  <!-- 零件片段：include 时根 body 被剥掉，内容合并到外层 body。 -->
+
+  <!-- 质量按 30 kg 估算；静态场景中不参与动力学，动态使用时请按实测值修改 -->
+  <inertial pos="0 0 0.1365" mass="30" diaginertia="2.54 4.54 6.71"/>
+
+  <!-- 视觉网格，原点在底面中心 -->
+  <geom name="battery_visual" type="mesh" mesh="battery" material="battery"
+        contype="0" conaffinity="0" group="2"/>
+
+  <!-- 主板顶面约 z=0.148 m；后侧凸边另由视觉网格呈现，不应把整个顶面抬高到 0.273 m。 -->
+  <geom name="battery_collision" type="box" size="0.66 0.485 0.074" pos="0 0 0.074"
+        group="3" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
+
+  <site name="battery_top" pos="0 0 0.273" size="0.02 0.02 0.02" rgba="0.2 0.9 0.2 0.6"/>
+</body>
