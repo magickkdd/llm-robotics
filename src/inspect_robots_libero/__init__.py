@@ -25,9 +25,14 @@ from typing import Any
 from inspect_robots.task import Task
 
 from inspect_robots_libero.embodiment import LiberoEmbodiment
-from inspect_robots_libero.tasks import LIBERO_10_TASKS, libero_10_task
+from inspect_robots_libero.tasks import (
+    LIBERO_10_TASKS,
+    LIBERO_OBJECT_TASKS,
+    libero_10_task,
+    libero_object_task,
+)
 
-__all__ = ["LIBERO_10_TASKS", "LiberoEmbodiment", "libero_10", "libero_embodiment"]
+__all__ = ["LIBERO_10_TASKS", "LIBERO_OBJECT_TASKS", "LiberoEmbodiment", "libero_10", "libero_object", "libero_embodiment"]
 
 __version__ = "0.1.0"
 
@@ -40,3 +45,8 @@ def libero_embodiment(**kwargs: Any) -> LiberoEmbodiment:
 def libero_10(**kwargs: Any) -> Task:
     """Factory the registry calls (entry point ``libero_10``); the CLI forwards ``-T k=v``."""
     return libero_10_task(**kwargs)
+
+
+def libero_object(**kwargs: Any) -> Task:
+    """Factory for the native LIBERO-Object task suite."""
+    return libero_object_task(**kwargs)

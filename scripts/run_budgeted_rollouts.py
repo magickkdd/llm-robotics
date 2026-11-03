@@ -1,4 +1,4 @@
-"""Paid LLM rollouts on one LIBERO-10 task with hard spending caps.
+"""Paid LLM rollouts on one task from a native LIBERO suite with spending caps.
 
 Same Task / Embodiment / agent policy as ``inspect-robots run``, plus:
   * a fail-closed per-episode and total USD budget (``BudgetTransport``),
@@ -33,10 +33,20 @@ from inspect_robots_agent.policy import agent_policy
 
 from inspect_robots_libero.budget import PRICING, BudgetTransport, wire_for
 from inspect_robots_libero.embodiment import LiberoEmbodiment
-from inspect_robots_libero.tasks import LIBERO_10_TASKS, NUM_INIT_STATES, libero_10_task
+from inspect_robots_libero.tasks import (
+    NUM_INIT_STATES,
+    libero_suite_task,
+    load_suite_tasks,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 KEY_ENV = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "google": "GEMINI_API_KEY"}
+OPENAI_PROFILES = {
+    "luna": ("OPENAI_API_KEY_LUNA", "OPENAI_BASE_URL_LUNA"),
+    "terra": ("OPENAI_API_KEY_TERRA", "OPENAI_BASE_URL_TERRA"),
+    "deepseek": ("OPENAI_API_KEY_DEEPSEEK", "OPENAI_BASE_URL_DEEPSEEK"),
+    "sol61": ("OPENAI_API_KEY_SOL61", "OPENAI_BASE_URL_SOL61"),
+}
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
@@ -50,26 +60,33 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--model", choices=sorted(PRICING), required=True)
-    parser.add_argument("--task-id", type=int, choices=range(len(LIBERO_10_TASKS)), required=True,
-                        help="native LIBERO-10 task id (see README)")
+    suites = ("libero_spatial", "libero_object", "libero_goal", "libero_10", "libero_90")
+    parser.add_argument("--suite", choices=suites, default="libero_10")
+    parser.add_argument("--profile", choices=sorted(OPENAI_PROFILES),
+                        help="select a named OpenAI-compatible credential/base-URL profile")
+    parser.add_argument("--task-id", type=int, required=True,
+                        help="native task id within the selected suite")
     parser.add_argument("--episodes", type=int, default=1,
                         help="episodes on init states start..start+N-1")
     parser.add_argument("--start", type=int, default=0, help="first LIBERO init state")
     parser.add_argument("--total-budget", type=float, required=True, help="USD cap for the run")
     parser.add_argument("--episode-budget", type=float, default=3.0, help="USD cap per episode")
-    parser.add_argument("--max-calls", type=int, default=20, help="LLM requests per episode")
-    parser.add_argument("--effort", choices=EFFORTS, default="low")
+    parser.add_argument("--max-calls", type=int, default=80, help="LLM requests per episode (paper limit)")
+    parser.add_argument("--effort", choices=EFFORTS)
     parser.add_argument("--image-horizon", type=int, default=2,
                         help="how many past observations keep their images")
     parser.add_argument("--max-steps", type=int, default=900)
-    parser.add_argument("--max-output-tokens", type=int, default=2048,
+    parser.add_argument("--max-output-tokens", type=int, default=8192,
                         help="output-token cap per OpenAI request, reasoning included")
     parser.add_argument("--request-timeout", type=float,
-                        help="seconds to wait for one LLM response (upstream default for Claude: 128)")
+                        default=600.0,
+                        help="seconds to wait for one LLM response (default: 600)")
     parser.add_argument("--demo-manifest", type=Path,
                         help="storyboards from scripts/prepare_demonstrations.py (few-shot)")
     parser.add_argument("--task-notes", action="store_true",
                         help="append demonstration-derived hints (not zero-shot)")
+    parser.add_argument("--prior-learnings", type=Path,
+                        help="optional rollout-context notes injected separately from base system docs")
     parser.add_argument("--output", type=Path, required=True, help="new directory for this run")
     parser.add_argument("--execute-paid-rollouts", action="store_true",
                         help="required: acknowledges that this sends paid API requests")
@@ -82,10 +99,44 @@ def main() -> None:
         parser.error(f"init states must stay within 0..{NUM_INIT_STATES - 1}")
 
     settings = load_settings()
+    default_libero_python = Path.home() / "miniconda3/envs/libero/bin/python"
+    libero_python = settings.get("LIBERO_PYTHON") or (
+        str(default_libero_python) if default_libero_python.is_file() else sys.executable
+    )
+    try:
+        tasks = load_suite_tasks(args.suite, libero_python)
+    except Exception as exc:
+        parser.error(f"unable to load {args.suite} task catalog with {libero_python}: {exc}")
+    if not 0 <= args.task_id < len(tasks):
+        parser.error(f"--task-id must be in 0..{len(tasks) - 1} for {args.suite}")
     provider = args.model.partition("/")[0]
     key_env = KEY_ENV[provider]
+    if args.profile:
+        if provider != "openai":
+            parser.error("--profile can only be used with openai/* models")
+        key_env, profile_base_env = OPENAI_PROFILES[args.profile]
+        if args.profile == "deepseek":
+            if not settings.get(key_env):
+                key_env = "OPENAI_API_KEY"
+            if not settings.get(profile_base_env):
+                profile_base_env = "OPENAI_BASE_URL"
+        if not settings.get(key_env):
+            parser.error(f"{key_env} is not set; configure the {args.profile} profile in {ROOT / '.env'}")
+        if not settings.get(profile_base_env):
+            parser.error(f"{profile_base_env} is not set; configure the {args.profile} profile in {ROOT / '.env'}")
+        settings["OPENAI_BASE_URL"] = settings[profile_base_env]
     if not settings.get(key_env):
         parser.error(f"{key_env} is not set; put it in {ROOT / '.env'} (see .env.example)")
+
+    base_url = settings.get("OPENAI_BASE_URL") if provider == "openai" else None
+    wire = wire_for(args.model, base_url=base_url)
+    effort = args.effort if args.effort is not None else (None if base_url else "low")
+    policy_model = args.model.partition("/")[2] if base_url else args.model
+    policy_base_url = (
+        base_url.rstrip("/") + "/v1"
+        if base_url and wire == "responses" and not base_url.rstrip("/").endswith("/v1")
+        else base_url
+    )
 
     # A fresh directory per run: never resume a paid run and risk double billing.
     output = args.output.resolve()
@@ -95,21 +146,27 @@ def main() -> None:
         output / "api", args.total_budget, args.episode_budget, task_id=args.task_id,
         demo_manifest=args.demo_manifest, max_calls=args.max_calls, model=args.model,
         image_horizon=args.image_horizon, max_output_tokens=args.max_output_tokens,
+        base_url=base_url,
     )
-    full_task = libero_10_task(args.task_id, num_scenes=args.episodes, start=args.start,
-                               max_steps=args.max_steps)
+    full_task = libero_suite_task(args.suite, args.task_id, tasks,
+                                  num_scenes=args.episodes, start=args.start,
+                                  max_steps=args.max_steps)
     protocol = {
         "model": args.model,
-        "wire": wire_for(args.model),
+        "suite": args.suite,
+        "wire": wire,
+        "api_base_url": base_url,
         "task_id": args.task_id,
-        "task_name": LIBERO_10_TASKS[args.task_id][0],
-        "instruction": LIBERO_10_TASKS[args.task_id][1],
+        "task_name": tasks[args.task_id][0],
+        "instruction": tasks[args.task_id][1],
         "episodes": args.episodes,
         "initial_state_ids": [s.metadata["init_state"] for s in full_task.scenes],
         "env_seeds": [s.init_seed for s in full_task.scenes],
         "max_steps": args.max_steps,
         "max_api_attempts_per_episode": args.max_calls,
-        "reasoning_effort": args.effort,
+        "allow_model_give_up": False,
+        "require_environment_success_for_done": args.suite.startswith("libero_"),
+        "reasoning_effort": effort,
         "image_horizon": args.image_horizon,
         "max_output_tokens": args.max_output_tokens,
         "request_timeout_s": args.request_timeout,
@@ -118,7 +175,7 @@ def main() -> None:
         "zero_shot": args.demo_manifest is None and not args.task_notes,
         "task_notes": args.task_notes,
         "demonstrations": json.loads(args.demo_manifest.read_text()) if args.demo_manifest else False,
-        "prior_learnings": None,
+        "prior_learnings": str(args.prior_learnings.resolve()) if args.prior_learnings else None,
         "upstream_commit": (ROOT / "upstream_commit.txt").read_text().strip(),
         "budget_note": "Conservative local reservations; provider billing remains authoritative.",
     }
@@ -143,20 +200,28 @@ def main() -> None:
             print(f"[episode {ep}] {scene.id}: starting simulator "
                   f"(up to {args.max_calls} LLM calls, {args.max_steps} steps)", file=sys.stderr, flush=True)
             folder = output / f"episode_{ep:02d}"
-            embodiment = LiberoEmbodiment(task_id=args.task_id, output_dir=folder,
-                                          libero_python=settings.get("LIBERO_PYTHON"),
+            embodiment = LiberoEmbodiment(task_id=args.task_id, suite=args.suite, output_dir=folder,
+                                          libero_python=libero_python,
                                           task_notes=args.task_notes)
-            # No base_url: upstream resolves the provider from the model prefix.
+            policy_options = {
+                "model": policy_model, "base_url": policy_base_url, "api_key_env": key_env,
+                "env": {key_env: settings[key_env]}, "wire": wire,
+                "max_llm_calls": args.max_calls,
+                "image_horizon": args.image_horizon,
+                "prior_learnings": str(args.prior_learnings.resolve()) if args.prior_learnings else None,
+                "allow_give_up": False,
+                "require_success_for_done": args.suite.startswith("libero_"),
+                "transport": transport, "wire_capture": True,
+            }
+            if effort is not None:
+                policy_options["effort"] = effort
             policy = agent_policy(
-                model=args.model, env={key_env: settings[key_env]}, wire=wire_for(args.model),
-                effort=args.effort, max_llm_calls=args.max_calls,
-                image_horizon=args.image_horizon, prior_learnings=None,
-                transport=transport, wire_capture=True,
+                **policy_options,
             )
             if args.request_timeout:
                 # Only the wait changes; the request itself is identical. A response that takes
                 # longer than the timeout is otherwise reported as a network error and stops the task.
-                policy._client._http.timeout = httpx.Timeout(args.request_timeout, connect=10.0)
+                policy._client._http.timeout = httpx.Timeout(args.request_timeout, connect=60.0)
             task = Task(name=full_task.name, scenes=[scene], scorer=full_task.scorer,
                         max_steps=args.max_steps)
             # The CLI's default guardrails (bounds clamp + per-step delta limit);

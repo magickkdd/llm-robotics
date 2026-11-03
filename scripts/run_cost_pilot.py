@@ -66,7 +66,7 @@ def main():
                    help='hard cap for each model/effort episode (default: 5)')
     p.add_argument('--task-id', type=int, choices=range(10), default=0)
     p.add_argument('--init-state', type=int, choices=range(50), default=0)
-    p.add_argument('--max-calls', type=int, default=100,
+    p.add_argument('--max-calls', type=int, default=80,
                    help='emergency per-episode LLM-call ceiling (default: 100)')
     p.add_argument('--max-steps', type=int, default=900,
                    help='simulator-step horizon per episode (default: 900)')

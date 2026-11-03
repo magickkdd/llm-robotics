@@ -104,12 +104,34 @@ Keys live only in `.env` in the repo root. `.gitignore` excludes it
 ```bash
 # .env
 OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://spacetimeai.cc
 ANTHROPIC_API_KEY=sk-ant-...
 # GEMINI_API_KEY=...
 ```
 
 Fill in only the providers you use. The variable names are the ones
 `inspect-robots-agent` looks for (see [Use a different LLM](#use-a-different-llm)).
+The budgeted runner routes OpenAI models through `OPENAI_BASE_URL` using the
+Responses API wire; omit `--effort` unless that gateway explicitly supports
+`reasoning_effort`.
+
+For multiple OpenAI-compatible gateways, keep separate credentials in named
+profiles instead of replacing the generic variables:
+
+```bash
+OPENAI_API_KEY_LUNA=...
+OPENAI_BASE_URL_LUNA=https://spacetimeai.cc
+OPENAI_API_KEY_TERRA=...
+OPENAI_BASE_URL_TERRA=https://spacetimeai.cc
+OPENAI_API_KEY_DEEPSEEK=...
+OPENAI_BASE_URL_DEEPSEEK=https://discovery-api.intern-ai.org.cn/v1
+OPENAI_API_KEY_SOL61=...
+OPENAI_BASE_URL_SOL61=https://max2.jojocode.com
+```
+
+Select the matching profile at launch with `--profile luna`, `--profile terra`,
+`--profile deepseek`, or `--profile sol61`; the generic `OPENAI_API_KEY` and `OPENAI_BASE_URL`
+remain available for runs without `--profile`.
 
 Run commands from the repo root so `.env` is found. Variables already set in
 your shell take precedence.
@@ -288,6 +310,16 @@ inspect-robots inspect outputs/logs/<log>.json --transcript   # what the model s
 inspect-robots view outputs/logs --serve                      # HTML viewer
 ```
 
+For budgeted runs, use the rollout dashboard to switch among recorded runs;
+its position marker follows the video playback and progress slider:
+
+```bash
+python scripts/view_rollout.py outputs/my-run --serve
+```
+
+The dashboard scans sibling run folders under `outputs/` and generates an
+inspector page for each recorded episode.
+
 LIBERO's success predicate is checked after every control step. As soon as it
 becomes true, the episode ends as a success (`success_at_end = 1`), even in the
 middle of a `move_to` call. When the model calls `done`, the episode ends, but
@@ -335,14 +367,33 @@ embodiment and policy as the CLI, with these additions:
 - It writes `protocol.json` (everything needed to reproduce the run) and
   `summary.json` (one result row per episode).
 
+The paid runner accepts the native `libero_spatial`, `libero_object`,
+`libero_goal`, `libero_10`, and `libero_90` suites. Task ids use each suite's
+native order; the 90-task catalog is read from the configured LIBERO Python
+environment. The standard suites contain 10 tasks each and LIBERO-90 contains
+90. Each task can be run independently, which keeps completed task outputs
+available if a later run stops.
+
+To run every task in the four 10-task suites plus a seeded sample from
+LIBERO-90, use `scripts/run_libero_batch.py`. It runs one initial state per task,
+prints each rollout's live progress, writes a separate directory per task, and
+stops the batch if API usage becomes unknown. Its default local budget caps are
+deliberately high; fail-closed accounting remains enabled.
+
 ```bash
 python scripts/run_budgeted_rollouts.py \
   --model anthropic/claude-opus-5-5 \
   --task-id 2 --episodes 5 --start 0 \
-  --total-budget 10 --episode-budget 3 --max-calls 20 --effort low \
+  --total-budget 10 --episode-budget 3 --max-calls 80 --effort low \
   --output outputs/task02_opus_zeroshot \
   --execute-paid-rollouts
 ```
+
+For example, a DeepSeek run uses `--model openai/deepseek-v4.1-flash-1017
+--profile deepseek`; a Luna run uses `--model openai/gpt-6-luna --profile luna`.
+The DeepSeek profile accepts `OPENAI_API_KEY_DEEPSEEK` and
+`OPENAI_BASE_URL_DEEPSEEK`, falling back to `OPENAI_API_KEY` and
+`OPENAI_BASE_URL` when the dedicated variables are absent.
 
 Without `--execute-paid-rollouts` it sends nothing. `--output` must be a new
 directory, so a paid run is never resumed and billed twice. Results:
@@ -364,7 +415,11 @@ outputs/task02_opus_zeroshot/
 Only models with a price row are accepted: `openai/gpt-6-astra`,
 `openai/gpt-6-luna`, `openai/gpt-6-sol`, `openai/gpt-6.1-sol`,
 `anthropic/claude-opus-5`, `anthropic/claude-opus-5-5`,
-`google/gemini-4-argon`. To add
+`google/gemini-4-argon`. `openai/gpt-6.1-terra` is configured for the
+Spacetime Responses endpoint but has not yet been tested. Its local budget
+estimate temporarily reuses the Astra price row because Terra's channel price
+has not been verified; this is not a confirmed rate or guaranteed upper bound.
+To add
 one, put its per-million-token prices in `PRICING` in
 `src/inspect_robots_libero/budget.py`. A new provider also needs entries in
 `PROVIDER_WIRE` and `WIRE_ENDPOINTS`. The provider's own billing is the final
@@ -381,7 +436,7 @@ inside a sweep-wide cap. Unknown API usage stops the entire pilot.
 
 ```bash
 python scripts/run_cost_pilot.py \
-  --task-id 0 --init-state 0 --max-calls 100 --max-steps 900 \
+  --task-id 0 --init-state 0 --max-calls 80 --max-steps 900 \
   --max-output-tokens 8192 --per-run-budget 5 --total-budget 45 \
   --output outputs/my-cost-pilot --execute-paid-rollouts
 ```

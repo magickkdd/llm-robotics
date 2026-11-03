@@ -34,7 +34,7 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(self.sent,[])
     def test_accounting_caps_and_no_headers_logged(self):
         self.transport.begin_episode(0); self.request()
-        self.assertEqual(self.sent[0]['max_output_tokens'],2048)
+        self.assertEqual(self.sent[0]['max_output_tokens'],8192)
         self.assertEqual(self.sent[0]['service_tier'],'default')
         rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
         self.assertEqual(rows[-1]['request_id'],'req_mock')
@@ -63,7 +63,7 @@ class BudgetTests(unittest.TestCase):
         with self.assertRaises(BudgetStop): self.request()
 
     def test_attempt_cap(self):
-        self.transport.begin_episode(0); self.transport.calls=20
+        self.transport.begin_episode(0); self.transport.calls=80
         with self.assertRaises(BudgetStop): self.request()
         self.assertEqual(self.sent,[])
     def test_unknown_usage_stops_subsequent_calls(self):
@@ -72,6 +72,75 @@ class BudgetTests(unittest.TestCase):
         self.request()
         with self.assertRaises(BudgetStop): self.request()
         self.assertTrue(self.transport.uncertain)
+
+    def test_network_error_records_exception_type_without_request_headers(self):
+        self.transport.begin_episode(0)
+        self.transport.inner=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(httpx.ReadTimeout('mock timeout')))
+        with (mock.patch.object(budget,'_READ_ERROR_BACKOFF_S',(0,0,0)),
+              mock.patch.object(budget.time,'sleep')):
+            with self.assertRaises(BudgetStop):
+                self.request()
+        rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
+        unknown=next(row for row in rows if row['event']=='usage_unknown')
+        self.assertEqual(unknown['error_type'],'ReadTimeout')
+        retries=[row for row in rows if row['event']=='read_error_retry']
+        self.assertEqual(len(retries),3)
+        self.assertEqual(unknown['reserved_usd'],4*retries[0]['additional_reservation_usd'])
+        self.assertNotIn('Authorization',json.dumps(rows))
+
+    def test_read_timeout_retries_then_succeeds_with_extra_reservation(self):
+        self.transport.begin_episode(0)
+        attempts={'count':0}
+        def reply(request):
+            attempts['count']+=1
+            if attempts['count']==1:
+                raise httpx.ReadTimeout('mock timeout')
+            return httpx.Response(200,json={'id':'resp_mock','output':[],
+                'usage':{'input_tokens':100,'output_tokens':50}})
+        self.transport.inner=httpx.MockTransport(reply)
+        with (mock.patch.object(budget,'_READ_ERROR_BACKOFF_S',(0,)),
+              mock.patch.object(budget.time,'sleep')):
+            self.assertEqual(self.request().status_code,200)
+        self.assertEqual(attempts['count'],2)
+        self.assertEqual(self.transport.calls,1)
+        self.assertFalse(self.transport.uncertain)
+        rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(row['event']=='read_error_retry' for row in rows),1)
+        self.assertGreater(self.transport.used,rows[0]['reservation_usd'])
+
+    def test_connect_timeout_retries_then_succeeds_as_one_call(self):
+        self.transport.begin_episode(0)
+        attempts={'count':0}
+        def reply(request):
+            attempts['count']+=1
+            if attempts['count']<3:
+                raise httpx.ConnectTimeout('mock connect timeout')
+            return httpx.Response(200,json={'id':'resp_mock','output':[],
+                'usage':{'input_tokens':100,'output_tokens':50}})
+        self.transport.inner=httpx.MockTransport(reply)
+        with (mock.patch.object(budget,'_CONNECT_TIMEOUT_BACKOFF_S',(0,0)),
+              mock.patch.object(budget.time,'sleep')):
+            self.assertEqual(self.request().status_code,200)
+        self.assertEqual(attempts['count'],3)
+        self.assertEqual(self.transport.calls,1)
+        self.assertFalse(self.transport.uncertain)
+        rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(row['event']=='connect_timeout_retry' for row in rows),2)
+
+    def test_exhausted_connect_timeouts_release_reservation(self):
+        self.transport.begin_episode(0)
+        self.transport.inner=httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(httpx.ConnectTimeout('mock connect timeout')))
+        with (mock.patch.object(budget,'_CONNECT_TIMEOUT_BACKOFF_S',(0,)),
+              mock.patch.object(budget.time,'sleep')):
+            with self.assertRaises(BudgetStop):
+                self.request()
+        self.assertFalse(self.transport.uncertain)
+        self.assertEqual(self.transport.blocked,'connect_timeout_exhausted')
+        self.assertAlmostEqual(self.transport.used,0)
+        self.assertAlmostEqual(self.transport.episode_used,0)
+
     def test_server_error_retried_as_one_call(self):
         self.transport.begin_episode(0)
         replies=iter([httpx.Response(503,json={'error':'mock'}),httpx.Response(529,json={'error':'mock'})])
@@ -103,6 +172,86 @@ class BudgetTests(unittest.TestCase):
         with self.assertRaises(BudgetStop):
             self.client.post('https://example.com/v1/responses',json={'model':'gpt-6-astra'})
         self.assertEqual(self.sent,[])
+
+    def test_spacetime_responses_endpoint(self):
+        self.transport.dispose()
+        received=[]
+        def reply(request):
+            received.append(json.loads(request.content))
+            return httpx.Response(200,headers={'x-request-id':'spacetime_mock'},json={
+                'id':'resp_mock','status':'completed','output':[],
+                'usage':{'input_tokens':100,'output_tokens':50,'total_tokens':150}})
+        transport=BudgetTransport(self.tmp.name,15,inner=httpx.MockTransport(reply),
+            model='openai/gpt-6-luna',base_url='https://spacetimeai.cc')
+        client=httpx.Client(transport=transport)
+        try:
+            self.assertEqual(transport.wire,'responses')
+            self.assertEqual(transport.expected_path,'/v1/responses')
+            transport.begin_episode(0)
+            response=client.post('https://spacetimeai.cc/v1/responses',json={
+                'model':'gpt-6-luna','input':'hello','tools':[]})
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(received[0]['max_output_tokens'],8192)
+            self.assertEqual(transport.uncertain,False)
+        finally:
+            client.close()
+            transport.dispose()
+
+    def test_spacetime_terra_responses_endpoint(self):
+        received=[]
+        def reply(request):
+            received.append(json.loads(request.content))
+            return httpx.Response(200,headers={'x-request-id':'terra_mock'},json={
+                'id':'resp_terra_mock','status':'completed','output':[],
+                'usage':{'input_tokens':100,'output_tokens':50,'total_tokens':150}})
+        transport=BudgetTransport(self.tmp.name,15,inner=httpx.MockTransport(reply),
+            model='openai/gpt-6.1-terra',base_url='https://spacetimeai.cc',
+            endpoint_base_url='https://spacetimeai.cc')
+        client=httpx.Client(transport=transport)
+        try:
+            self.assertEqual(transport.wire,'responses')
+            self.assertEqual(transport.expected_path,'/responses')
+            transport.begin_episode(0)
+            response=client.post('https://spacetimeai.cc/responses',json={
+                'model':'gpt-6.1-terra','input':'hello','tools':[]})
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(received[0]['model'],'gpt-6.1-terra')
+            self.assertFalse(transport.uncertain)
+        finally:
+            client.close()
+            transport.dispose()
+
+    def test_spacetime_root_responses_endpoint(self):
+        received=[]
+        def reply(request):
+            received.append(json.loads(request.content))
+            return httpx.Response(200,headers={'x-request-id':'spacetime_root_mock'},json={
+                'id':'resp_mock','status':'completed','output':[],
+                'usage':{'input_tokens':100,'output_tokens':50,'total_tokens':150}})
+        transport=BudgetTransport(self.tmp.name,15,inner=httpx.MockTransport(reply),
+            model='openai/gpt-6-luna',base_url='https://spacetimeai.cc',
+            endpoint_base_url='https://spacetimeai.cc')
+        client=httpx.Client(transport=transport)
+        try:
+            self.assertEqual(transport.expected_path,'/responses')
+            transport.begin_episode(0)
+            response=client.post('https://spacetimeai.cc/responses',json={
+                'model':'gpt-6-luna','input':'hello','tools':[]})
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(received[0]['max_output_tokens'],8192)
+            self.assertFalse(transport.uncertain)
+        finally:
+            client.close()
+            transport.dispose()
+
+    def test_custom_responses_base_url_is_https_and_v1(self):
+        self.assertEqual(budget.wire_for('openai/deepseek-v4.1-flash-1017',
+                                         base_url='https://discovery-api.intern-ai.org.cn/v1'),
+                         'responses')
+        for base_url in ('http://discovery-api.intern-ai.org.cn/v1',
+                         'https://example.com/v2','https://discovery-api.intern-ai.org.cn/v1/other'):
+            with self.subTest(base_url=base_url), self.assertRaises(ValueError):
+                budget.wire_for('openai/deepseek-v4.1-flash-1017',base_url=base_url)
 
 class AnthropicBudgetTests(unittest.TestCase):
     def setUp(self):

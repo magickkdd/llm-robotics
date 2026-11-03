@@ -62,7 +62,8 @@ def main():
                         env.close()
                     if video is not None:
                         video.close()
-                    suite = benchmark.get_benchmark_dict()['libero_10']()
+                    suite_name = req.get('suite', 'libero_10')
+                    suite = benchmark.get_benchmark_dict()[suite_name]()
                     task_id = int(req['task_id'])
                     task = suite.get_task(task_id)
                     env = OffScreenRenderEnv(bddl_file_name=str(Path(get_libero_path('bddl_files')) /
@@ -75,7 +76,13 @@ def main():
                         obs, _, _, _ = env.step(np.array([0., 0., 0., 0., 0., 0., -1.]))
                     env.env.robots[0].controller.use_delta = False
                     steps = 0
-                    video = imageio.get_writer(req['video'], fps=20)
+                    video = imageio.get_writer(
+                        req['video'],
+                        fps=20,
+                        codec='libx264',
+                        pixelformat='yuv420p',
+                        ffmpeg_params=['-movflags', '+faststart'],
+                    )
                     result = pack()
                     result['instruction'] = task.language
                 elif req['op'] == 'step':

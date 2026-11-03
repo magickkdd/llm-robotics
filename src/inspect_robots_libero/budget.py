@@ -17,6 +17,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 import httpx
 from PIL import Image
 
@@ -50,6 +51,8 @@ _THINKING_BINDING_BETA='thinking-binding-controls-2026-08-01'
 # before the request counts as failed. Providers do not bill these responses.
 _SERVER_ERROR_STATUSES=frozenset({408,409,429,500,502,503,504,520,529})
 _SERVER_ERROR_BACKOFF_S=(15,30,60,120)
+_CONNECT_TIMEOUT_BACKOFF_S=(20,40,80)
+_READ_ERROR_BACKOFF_S=(30,60,120)
 
 # Per-1M-token USD rates: (regular_input, cached_input, cache_write, output),
 # keyed by the upstream model id (``provider/model``). Input/output rates are
@@ -61,8 +64,11 @@ _SERVER_ERROR_BACKOFF_S=(15,30,60,120)
 PRICING={
     'openai/gpt-6-astra':(10.,1.,12.5,50.),
     'openai/gpt-6-luna':(0.10,0.01,0.125,0.50),
+    'openai/gpt-6.1-terra':(10.,1.,12.5,50.),
     'openai/gpt-6-sol':(2.,0.2,2.5,10.),
     'openai/gpt-6.1-sol':(2.,0.1,2.5,10.),
+    # DeepSeek public peak rates used as a conservative local estimate for OpenAI-compatible gateways.
+    'openai/deepseek-v4.1-flash-1017':(0.30,0.006,0.30,1.20),
     'anthropic/claude-opus-5-5':(4.,0.2,5.,20.),
     # $5/$25 published; cache read 0.1x and 5-minute cache write 1.25x of input (2026-10-11).
     'anthropic/claude-opus-5':(5.,0.5,6.25,25.),
@@ -73,16 +79,24 @@ PRICING={
 }
 
 
-def wire_for(model):
+def wire_for(model, base_url=None):
     """Return the wire this transport audits for ``model`` (a ``provider/model`` id)."""
     if model not in PRICING:
         raise ValueError(f'no pricing for {model!r}; budgeted models: {sorted(PRICING)}. '
                          'Add a row to PRICING in inspect_robots_libero/budget.py first.')
+    if base_url:
+        parsed=urlsplit(base_url.rstrip('/'))
+        if (parsed.scheme,parsed.username,parsed.password,parsed.port,
+                parsed.query,parsed.fragment)!=('https',None,None,None,'','') or not parsed.hostname or parsed.path not in ('','/v1'):
+            raise ValueError('OPENAI_BASE_URL must be an HTTPS origin with an optional /v1 path')
+        if model.partition('/')[0]!='openai':
+            raise ValueError('OPENAI_BASE_URL can only be used with openai/* models')
+        return 'responses'
     return PROVIDER_WIRE[model.partition('/')[0]]
 
 
 class BudgetTransport(httpx.BaseTransport):
-    def __init__(self, output, total_budget, episode_budget=3., inner=None, task_id=0, demo_manifest=None, max_calls=20, model='openai/gpt-6-astra', image_horizon=2, max_output_tokens=2048):
+    def __init__(self, output, total_budget, episode_budget=3., inner=None, task_id=0, demo_manifest=None, max_calls=80, model='openai/gpt-6-astra', image_horizon=2, max_output_tokens=8192, base_url=None, endpoint_base_url=None):
         if not isinstance(max_output_tokens, int) or not 1 <= max_output_tokens <= 128000:
             raise ValueError("max_output_tokens must be an integer in 1..128000")
         self.max_output_tokens=max_output_tokens
@@ -92,8 +106,23 @@ class BudgetTransport(httpx.BaseTransport):
         self.max_calls=max_calls
         # Two cameras per kept observation; None keeps the full image history.
         self.max_live_images=None if image_horizon is None else 2*image_horizon
-        self.wire=wire_for(model)
+        self.wire=wire_for(model,base_url=base_url)
         self.model=model
+        self.base_url=base_url.rstrip('/') if base_url else None
+        if self.base_url:
+            parsed=urlsplit(self.base_url)
+            self.expected_host=parsed.hostname
+            endpoint_path=parsed.path.rstrip('/') or '/v1'
+            if endpoint_base_url is not None:
+                endpoint=urlsplit(endpoint_base_url.rstrip('/'))
+                if ((endpoint.scheme,endpoint.hostname,endpoint.port)!=(parsed.scheme,parsed.hostname,parsed.port)
+                        or endpoint.username is not None or endpoint.password is not None
+                        or endpoint.query or endpoint.fragment or endpoint.path not in ('','/','/v1')):
+                    raise ValueError('endpoint_base_url must use the configured HTTPS host with an optional /v1 path')
+                endpoint_path=endpoint.path.rstrip('/')
+            self.expected_path=endpoint_path+'/responses'
+        else:
+            self.expected_host,self.expected_path=WIRE_ENDPOINTS[self.wire]
         # Upstream strips the provider prefix before sending (resolve_provider).
         self.wire_model=model.partition('/')[2]
         self.demo_message=None
@@ -221,9 +250,8 @@ class BudgetTransport(httpx.BaseTransport):
             self.stop('not_inside_rollout')
         if self.calls>=self.max_calls:
             self.stop('api_attempt_limit')
-        expected_host,expected_path=WIRE_ENDPOINTS[self.wire]
         if (request.method, request.url.scheme, request.url.host, request.url.path) != (
-                'POST','https',expected_host,expected_path):
+                'POST','https',self.expected_host,self.expected_path):
             self.stop('endpoint_not_allowed')
         body=json.loads(request.read())
         if body.get('model')!=self.wire_model:
@@ -243,6 +271,8 @@ class BudgetTransport(httpx.BaseTransport):
         if self.wire=='responses':
             body.update(max_output_tokens=self.max_output_tokens, service_tier='default', store=False)
             body['metadata']={'experiment':'llm_libero_10','task_id':str(self.task_id),'episode':str(self.episode)}
+            if self.model=='openai/deepseek-v4.1-flash-1017':
+                body.pop('include',None)
             output_cap=self.max_output_tokens
         elif self.wire=='chat':
             # Upstream's chat client sends no output limit. On Gemini, max_completion_tokens
@@ -291,23 +321,83 @@ class BudgetTransport(httpx.BaseTransport):
         if 'block_binding' in (body.get('thinking') or {}):
             betas=[b for b in headers.get('anthropic-beta','').split(',') if b]
             headers['anthropic-beta']=','.join(betas+[_THINKING_BINDING_BETA])
-        outgoing=httpx.Request('POST',request.url,headers=headers,content=content,extensions=request.extensions)
+        def outgoing_request():
+            return httpx.Request('POST',request.url,headers=headers,content=content,
+                                 extensions=request.extensions)
         ident=f'ep{self.episode:02d}_call{self.calls:02d}'
         self.record({'event':'request_started','call':self.calls,'reservation_usd':reserve,
                      'input_token_reservation':input_reserve,'output_token_cap':output_cap,'images':images,'sha256':hashlib.sha256(content).hexdigest()})
         (self.output/f'{ident}_request.json').write_bytes(content)
         self.progress('waiting for the model...')
         request_start=time.monotonic()
+
+        read_retries=0
+
+        def send_with_connect_retries():
+            for retry, wait in enumerate((*_CONNECT_TIMEOUT_BACKOFF_S, None)):
+                try:
+                    response=self.inner.handle_request(outgoing_request())
+                    response.read()
+                    return response
+                except httpx.ConnectTimeout:
+                    if wait is None:
+                        if read_retries==0:
+                            self.used-=reserve
+                            self.episode_used-=reserve
+                        self.blocked='connect_timeout_exhausted'
+                        self.record({'event':'connect_timeout_exhausted','call':self.calls,
+                                     'released_usd':reserve if read_retries==0 else 0,
+                                     'latency_s':time.monotonic()-request_start,
+                                     'retries':retry})
+                        self.progress(f'connection timed out after {retry} retries; stopping without marking usage unknown')
+                        raise BudgetStop('connect_timeout_exhausted') from None
+                    self.record({'event':'connect_timeout_retry','call':self.calls,
+                                 'retry':retry+1,'wait_s':wait})
+                    self.progress(f'connection timed out; retry {retry+1}/{len(_CONNECT_TIMEOUT_BACKOFF_S)} in {wait}s')
+                    time.sleep(wait)
+
+        def send_with_read_retries():
+            nonlocal read_retries
+            while True:
+                try:
+                    return send_with_connect_retries()
+                except BudgetStop:
+                    raise
+                except Exception as exc:
+                    retryable=isinstance(
+                        exc,(httpx.ReadTimeout,httpx.ReadError,httpx.RemoteProtocolError)
+                    )
+                    if retryable and read_retries<len(_READ_ERROR_BACKOFF_S):
+                        if self.used+reserve>self.total_budget or self.episode_used+reserve>self.episode_budget:
+                            self.uncertain=True
+                            self.record({'event':'usage_unknown','call':self.calls,
+                                         'reserved_usd':reserve*(read_retries+1),
+                                         'latency_s':time.monotonic()-request_start,
+                                         'error_type':type(exc).__name__,
+                                         'retry_stopped':'budget_reservation_limit'})
+                            self.progress('read failed; retry blocked by budget reservation limit, usage unknown')
+                            raise BudgetStop('network_error_usage_unknown') from None
+                        wait=_READ_ERROR_BACKOFF_S[read_retries]
+                        read_retries+=1
+                        self.used+=reserve
+                        self.episode_used+=reserve
+                        self.record({'event':'read_error_retry','call':self.calls,
+                                     'retry':read_retries,'wait_s':wait,
+                                     'error_type':type(exc).__name__,
+                                     'additional_reservation_usd':reserve})
+                        self.progress(f'{type(exc).__name__}; retry {read_retries}/{len(_READ_ERROR_BACKOFF_S)} in {wait}s (additional budget reserved)')
+                        time.sleep(wait)
+                        continue
+                    self.uncertain=True
+                    self.record({'event':'usage_unknown','call':self.calls,
+                                 'reserved_usd':reserve*(read_retries+1),
+                                 'latency_s':time.monotonic()-request_start,
+                                 'error_type':type(exc).__name__})
+                    self.progress(f'network error ({type(exc).__name__}), usage unknown; stopping')
+                    raise BudgetStop('network_error_usage_unknown') from None
+
+        response=send_with_read_retries()
         for attempt in range(len(_SERVER_ERROR_BACKOFF_S)+1):
-            try:
-                response=self.inner.handle_request(outgoing)
-                response.read()
-            except Exception:
-                self.uncertain=True
-                self.record({'event':'usage_unknown','call':self.calls,'reserved_usd':reserve,
-                             'latency_s':time.monotonic()-request_start})
-                self.progress('network error, usage unknown; stopping')
-                raise BudgetStop('network_error_usage_unknown') from None
             if response.status_code not in _SERVER_ERROR_STATUSES or attempt==len(_SERVER_ERROR_BACKOFF_S):
                 break
             wait=_SERVER_ERROR_BACKOFF_S[attempt]
@@ -315,6 +405,7 @@ class BudgetTransport(httpx.BaseTransport):
                          'http_status':response.status_code,'wait_s':wait})
             self.progress(f'HTTP {response.status_code} (transient provider response); retrying in {wait}s')
             time.sleep(wait)
+            response=send_with_read_retries()
         payload=None
         try:
             payload=response.json()

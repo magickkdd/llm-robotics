@@ -33,7 +33,7 @@ from inspect_robots.spaces import (
 from inspect_robots.types import Action, Observation, StepResult
 
 from inspect_robots_libero.notes import TASK_NOTES
-from inspect_robots_libero.tasks import ENV_SEED_BASE, check_task_id
+from inspect_robots_libero.tasks import ENV_SEED_BASE, check_object_task_id, check_task_id
 
 CONTROL_HZ = 20
 WORKER = Path(__file__).with_name("_worker.py")
@@ -119,8 +119,19 @@ class LiberoEmbodiment(EmbodimentBase):
         output_dir: str | os.PathLike[str] = "outputs/libero",
         libero_python: str | None = None,
         task_notes: bool = False,
+        suite: str = "libero_10",
     ) -> None:
-        self.task_id = None if task_id is None else check_task_id(task_id)
+        if suite not in ("libero_10", "libero_object", "libero_spatial", "libero_goal", "libero_90"):
+            raise ConfigError(f"unsupported LIBERO suite {suite!r}")
+        if task_notes and suite != "libero_10":
+            raise ConfigError("task_notes are only defined for libero_10")
+        self.suite = suite
+        if suite == "libero_10":
+            self.task_id = None if task_id is None else check_task_id(task_id)
+        elif suite == "libero_object":
+            self.task_id = None if task_id is None else check_object_task_id(task_id)
+        else:
+            self.task_id = task_id
         self.init_state = init_state
         self.output = Path(output_dir)
         self.libero_python = libero_python or os.environ.get("LIBERO_PYTHON") or sys.executable
@@ -129,7 +140,7 @@ class LiberoEmbodiment(EmbodimentBase):
         docs = BASE_DOCS
         if task_notes and self.task_id in TASK_NOTES:
             docs += "\n\n" + TASK_NOTES[self.task_id]
-        name = "libero_10" if self.task_id is None else f"libero_10_task{self.task_id:02d}"
+        name = suite if self.task_id is None else f"{suite}_task{self.task_id:02d}"
         self.info = EmbodimentInfo(
             name=name,
             is_simulated=True,
@@ -175,6 +186,7 @@ class LiberoEmbodiment(EmbodimentBase):
             state=state,
             instruction=self.instruction,
             state_time=data["steps"] / CONTROL_HZ,
+            extra={"environment_success": bool(data.get("success", False))},
         )
 
     def _start_worker(self) -> None:
@@ -206,6 +218,9 @@ class LiberoEmbodiment(EmbodimentBase):
     def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
         """Load the scene's LIBERO task and init state, settle 10 steps, start a video."""
         meta = scene.metadata or {}
+        suite = meta.get("libero_suite", self.suite)
+        if suite != self.suite:
+            raise ConfigError(f"scene belongs to {suite}, but embodiment uses {self.suite}")
         task_id = meta.get("libero_task_id", self.task_id)
         if task_id is None:
             raise ConfigError(
@@ -227,6 +242,7 @@ class LiberoEmbodiment(EmbodimentBase):
         data = self._rpc(
             {
                 "op": "reset",
+                "suite": suite,
                 "task_id": int(task_id),
                 "init_state": init_state,
                 "env_seed": int(env_seed),

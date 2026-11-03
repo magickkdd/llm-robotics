@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=1.24",
     "httpx>=0.27",
     "pillow>=10",
+    "imageio-ffmpeg>=0.4.9",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,7 @@ libero = "inspect_robots_libero:libero_embodiment"
 
 [project.entry-points."inspect_robots.tasks"]
 libero_10 = "inspect_robots_libero:libero_10"
+libero_object = "inspect_robots_libero:libero_object"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inspect_robots_libero"]
