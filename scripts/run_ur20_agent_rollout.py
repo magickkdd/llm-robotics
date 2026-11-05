@@ -10,6 +10,7 @@ import textwrap
 from pathlib import Path
 
 import httpx
+import numpy as np
 from inspect_robots import eval as evaluate
 from inspect_robots._dotenv import read_dotenv
 from inspect_robots.approver import ChainApprover, ClampApprover, DeltaLimitApprover
@@ -17,7 +18,7 @@ from inspect_robots.scene import Scene
 from inspect_robots.task import Task
 from inspect_robots_agent.policy import agent_policy
 
-from encode_rollout_frames import encode_frames
+from encode_rollout_frames import encode_frames, encode_jpeg_frames
 from inspect_robots_libero.budget import PRICING, BudgetTransport, wire_for
 from inspect_robots_libero.ur20_embodiment import UR20ScrewEmbodiment
 from ur20_tui import UR20Dashboard
@@ -25,7 +26,8 @@ from ur20_tui import UR20Dashboard
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = {"luna": ("OPENAI_API_KEY_LUNA", "OPENAI_BASE_URL_LUNA"),
             "terra": ("OPENAI_API_KEY_TERRA", "OPENAI_BASE_URL_TERRA"),
-            "deepseek": ("OPENAI_API_KEY_DEEPSEEK", "OPENAI_BASE_URL_DEEPSEEK")}
+            "deepseek": ("OPENAI_API_KEY_DEEPSEEK", "OPENAI_BASE_URL_DEEPSEEK"),
+            "sol61": ("OPENAI_API_KEY_SOL61", "OPENAI_BASE_URL_SOL61")}
 
 
 class LiveConsole:
@@ -54,6 +56,8 @@ class LiveConsole:
         return f"{self.COLORS[color]}{text}{self.COLORS['reset']}"
 
     def _emit(self, line):
+        if line.startswith("[agent] >> input: "):
+            return
         if line.startswith("[agent] << tool_call "):
             payload = line[len("[agent] << tool_call "):]
             name, separator, raw_arguments = payload.partition("(")
@@ -61,7 +65,7 @@ class LiveConsole:
                 arguments = json.loads(raw_arguments[:-1]) if separator and raw_arguments.endswith(")") else {}
             except json.JSONDecodeError:
                 arguments = {}
-            targets = arguments.get("targets", {})
+            targets = arguments.get("targets", arguments.get("deltas", {}))
             target_text = ", ".join(f"{key}={value}" for key, value in targets.items())
             self.stream.write(self._paint(f"  ACTION  {name}  {target_text}\n", "yellow"))
             note = arguments.get("note")
@@ -106,18 +110,36 @@ class LiveConsole:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=["openai/gpt-6-luna", "openai/gpt-6.1-terra", "openai/deepseek-v4.1-flash-1017"], required=True)
+    parser.add_argument("--model", choices=["openai/gpt-6-luna", "openai/gpt-6.1-terra",
+                                             "openai/deepseek-v4.1-flash-1017", "openai/gpt-6.1-sol"],
+                        required=True)
     parser.add_argument("--profile", choices=sorted(PROFILES), required=True)
-    parser.add_argument("--max-calls", type=int, default=80)
+    parser.add_argument("--max-calls", type=int, default=50)
     parser.add_argument("--max-steps", type=int, default=600)
+    parser.add_argument("--action-amplification", type=float, default=3.0,
+                        help="multiply Cartesian target deltas before the 5 cm per-step cap (1-5; disabled after contact or low-confidence vision)")
     parser.add_argument("--state-id", type=int, choices=range(10), default=0)
     parser.add_argument("--max-output-tokens", type=int, default=8192)
     parser.add_argument("--request-timeout", type=float, default=300)
     parser.add_argument("--prior-learnings", type=Path)
     parser.add_argument("--tui", action="store_true", help="use the experimental live dashboard")
+    parser.add_argument("--mujoco-viewer", action="store_true",
+                        help="open a real-time MuJoCo window using the agentview camera")
+    parser.add_argument("--force-feedback", action="store_true",
+                        help="include estimated MuJoCo socket contact forces in policy observations")
+    parser.add_argument("--compliant-control", action="store_true",
+                        help="enable optional 1D axial force-admittance control after contact")
+    parser.add_argument("--spiral-search", action="store_true",
+                        help="expose a bounded force-controlled spiral socket-seating primitive")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--execute-paid-rollouts", action="store_true", required=True)
     args = parser.parse_args()
+    if args.compliant_control and not args.force_feedback:
+        parser.error("--compliant-control requires --force-feedback")
+    if args.spiral_search and not args.compliant_control:
+        parser.error("--spiral-search requires --compliant-control")
+    if not np.isfinite(args.action_amplification) or not 1.0 <= args.action_amplification <= 5.0:
+        parser.error("--action-amplification must be between 1.0 and 5.0")
     settings = {**read_dotenv(ROOT / ".env"), **os.environ}
     key_env, base_env = PROFILES[args.profile]
     if not settings.get(key_env) or not settings.get(base_env):
@@ -125,9 +147,9 @@ def main() -> None:
     base_url = settings[base_env].rstrip("/")
     wire = wire_for(args.model, base_url=base_url)
     policy_model = args.model.partition("/")[2]
-    # Luna's Spacetime Responses gateway uses the root URL; Discovery already
-    # includes /v1 in its configured base URL.
-    policy_base = base_url if args.profile == "luna" or base_url.endswith("/v1") else base_url + "/v1"
+    # Keep OpenAI-compatible Responses requests on the configured API version
+    # path, matching the endpoint validated by BudgetTransport.
+    policy_base = base_url if base_url.endswith("/v1") else base_url + "/v1"
     args.output.mkdir(parents=True, exist_ok=False)
     transport = BudgetTransport(args.output / "api", 100000, 100000, task_id=0,
                                 max_calls=args.max_calls, model=args.model,
@@ -135,7 +157,11 @@ def main() -> None:
                                 endpoint_base_url=policy_base)
     transport.begin_episode(0)
     embodiment = UR20ScrewEmbodiment(output_dir=args.output / "episode_00", state_id=args.state_id,
-                                     max_steps=args.max_steps)
+                                     max_steps=args.max_steps, include_force=args.force_feedback,
+                                     compliant_control=args.compliant_control,
+                                     spiral_search=args.spiral_search,
+                                     mujoco_viewer=args.mujoco_viewer,
+                                     action_amplification=args.action_amplification)
     policy_options = dict(model=policy_model, base_url=policy_base, api_key_env=key_env,
                           env={key_env: settings[key_env]}, wire=wire,
                           max_llm_calls=args.max_calls, image_horizon=2,
@@ -147,9 +173,46 @@ def main() -> None:
         policy_options["max_output_tokens"] = args.max_output_tokens
     policy = agent_policy(**policy_options)
     policy._client._http.timeout = httpx.Timeout(args.request_timeout, connect=10.0)
-    task = Task(name="ur20_battery_disassembly", scenes=[Scene(
-        f"ur20-screw-init{args.state_id:02d}",
-        "Remove the M6 external-hex screw from the battery. Align and seat the socket on the hex head, then rotate counterclockwise when viewed from above until the screw is extracted.")],
+    task_instruction = (
+        "Seat the socket securely onto the M6 external-hex screw head. At every observation, "
+        "use wristview-derived vision_screw_xy_estimate_m and vision_xy_error_m only when "
+        "vision_confidence is at least 0.5. Align x/y while holding z; the controller "
+        "blocks downward motion while confident estimated XY error exceeds 2 mm. "
+        + ("In force-controlled spiral-search mode, reassess estimated x/y error at "
+           "every observation: stop x/y corrections only while confident error is at "
+           "most 2 mm; if it later exceeds 2 mm, resume x/y correction. While aligned, "
+           "the controller enforces continued downward progress. "
+           if args.spiral_search else "")
+        + "move_to z is an absolute world coordinate and smaller z means downward. "
+        "Descend toward the visible screw top: use the full 5 cm safety-limited target "
+        "change while the visible gap is clearly larger than 5 cm; as the top gets near, "
+        "continue down through the remaining visible clearance instead of hovering above "
+        "it or commanding an upward retreat. "
+        + ("After XY alignment, when the estimated Z gap to the calibrated nominal "
+           "screw-top plane is at most "
+           "5 cm, the controller enables a 2 N compliant axial setpoint. "
+           if args.compliant_control else "")
+        + ("Once compensated tool-axis force reaches 1 N, contact takes priority over "
+           "policy motion regardless of residual XY alignment. The controller latches "
+           "into bounded spiral search to resolve lateral and external-hex phase mismatch; "
+           "do not wait for the 2 mm visual threshold or issue XY/Z commands after contact. "
+           "Never command an upward/retracting move after "
+           "contact; do not continue issuing z-down targets either. Let the controller "
+           "maintain compliant contact and run the complete bounded spiral search inside "
+           "this same move_to action; no repeated LLM calls are needed during the search. "
+           "Each "
+           "increment moves "
+           "the tip a small amount in the plane while rotating the socket 60 degrees. "
+           "Search stops on stable seating, its force guard, or the configured step limit. "
+           if args.spiral_search else "")
+        + "A useful visual cue is that, after the socket is properly seated over the "
+        "external-hex screw head, the screw head will normally be occluded by the socket "
+        "in agentview; treat this as supporting evidence, not proof by itself. Do not claim "
+        "contact until supported by visual or force evidence. Success is "
+        "stable physical socket engagement; do not rotate to extract the screw."
+    )
+    task = Task(name="ur20_hex_socket_seating", scenes=[Scene(
+        f"ur20-screw-init{args.state_id:02d}", task_instruction)],
         scorer="success_at_end", max_steps=args.max_steps)
     original_stderr = sys.stderr
     console = UR20Dashboard(original_stderr) if args.tui else LiveConsole(original_stderr)
@@ -157,6 +220,7 @@ def main() -> None:
     try:
         print(f"[UR20] model={args.model} state={args.state_id:02d} "
               f"limits={args.max_calls} calls/{args.max_steps} sim steps "
+              f"action-gain={args.action_amplification:.1f}x (5 cm cap) "
               f"output={args.output}", file=sys.stderr, flush=True)
         log, = evaluate(task, policy, embodiment, log_dir=str(args.output / "inspect"),
                         store_frames=True, store_actions=True,
@@ -167,20 +231,35 @@ def main() -> None:
         frame_dirs = sorted((args.output / "inspect" / "frames").glob("*"))
         frame_dir = next((path for path in frame_dirs if list(path.glob("*_agentview_*.npy"))), None)
         video_path = args.output / "rollout.mp4"
-        if frame_dir is not None:
-            encode_frames(frame_dir, video_path)
+        video_frame_count = 0
+        video_fps = 20
+        if list(embodiment.video_frames_dir.glob("ur20_video_*.jpg")):
+            video_frame_count = encode_jpeg_frames(
+                embodiment.video_frames_dir, video_path, fps=video_fps
+            )
+        elif frame_dir is not None:
+            video_frame_count = encode_frames(frame_dir, video_path)
         eval_error = getattr(log, "error", None)
         status = "success" if embodiment.task_success else "error" if eval_error else "task_failure"
         summary = {"status": status, "runner_status": log.status,
                    "environment_success": embodiment.task_success,
                    "valid_socket_engagement_seen": embodiment.engaged_seen,
+                   "success_criterion": "stable_socket_engagement",
+                   "required_stable_physics_steps": 20,
                    "max_screw_lift_m": embodiment.max_screw_lift,
-                   "required_screw_lift_m": 0.020,
                    "calls": transport.calls,
                    "sim_steps": embodiment.environment_steps,
                    "physics_steps": embodiment.physics_steps,
+                   "spiral_internal_increments": embodiment.spiral_internal_increments,
                    "estimated_usd": transport.episode_estimated,
                    "state_id": args.state_id,
+                   "force_feedback": args.force_feedback,
+                   "compliant_control": args.compliant_control,
+                   "spiral_search": args.spiral_search,
+                   "action_amplification": args.action_amplification,
+                   "video_frames": video_frame_count,
+                   "video_fps": video_fps,
+                   "simulation_realtime_pacing": True,
                    "video": str(video_path) if video_path.is_file() else None,
                    "output": str(args.output)}
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2))

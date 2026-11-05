@@ -248,10 +248,29 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(budget.wire_for('openai/deepseek-v4.1-flash-1017',
                                          base_url='https://discovery-api.intern-ai.org.cn/v1'),
                          'responses')
+        self.assertEqual(budget.wire_for('openai/gpt-6.1-sol',
+                                         base_url='https://api.diosirapi.co.uk/v1'),
+                         'responses')
         for base_url in ('http://discovery-api.intern-ai.org.cn/v1',
                          'https://example.com/v2','https://discovery-api.intern-ai.org.cn/v1/other'):
             with self.subTest(base_url=base_url), self.assertRaises(ValueError):
                 budget.wire_for('openai/deepseek-v4.1-flash-1017',base_url=base_url)
+
+    def test_sol61_diosir_endpoint_is_pinned_to_responses_path(self):
+        transport=BudgetTransport(self.tmp.name,15,inner=httpx.MockTransport(
+            lambda request:httpx.Response(200,json={'usage':{'input_tokens':100,'output_tokens':50},
+                                                    'output':[]})),
+            model='openai/gpt-6.1-sol',base_url='https://api.diosirapi.co.uk/v1')
+        try:
+            self.assertEqual(transport.expected_host,'api.diosirapi.co.uk')
+            self.assertEqual(transport.expected_path,'/v1/responses')
+            transport.begin_episode(0)
+            with httpx.Client(transport=transport) as client:
+                response=client.post('https://api.diosirapi.co.uk/v1/responses',json={
+                    'model':'gpt-6.1-sol','input':'offline','tools':[]})
+            self.assertEqual(response.status_code,200)
+        finally:
+            transport.dispose()
 
 class AnthropicBudgetTests(unittest.TestCase):
     def setUp(self):

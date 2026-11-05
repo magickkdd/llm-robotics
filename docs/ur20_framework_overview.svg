@@ -1,0 +1,182 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">UR20 Closed-Loop LLM Manipulation Framework</title>
+  <desc id="desc">Overview of observations, prompt assembly, multimodal LLM tool calls, action safety, MuJoCo execution, success checking, and feedback.</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#3978B8"/></marker>
+    <marker id="arrow-teal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#19877D"/></marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D57A27"/></marker>
+    <marker id="arrow-red" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#C85060"/></marker>
+    <filter id="shadow" x="-15%" y="-15%" width="130%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#1E3550" flood-opacity=".10"/></filter>
+    <style>
+      text{font-family:Inter,"Segoe UI",Arial,sans-serif;fill:#26364A}
+      .title{font-size:32px;font-weight:750;fill:#173A5E;letter-spacing:.2px}
+      .subtitle{font-size:15px;fill:#60758C}
+      .section{font-size:20px;font-weight:700}
+      .label{font-size:15px;font-weight:650}
+      .body{font-size:14px;fill:#53677D}
+      .small{font-size:12px;fill:#65798D}
+      .tiny{font-size:11px;fill:#6B7D90}
+      .card{fill:#fff;stroke:#DCE5EE;stroke-width:1.5;rx:14;filter:url(#shadow)}
+      .node{fill:#fff;stroke-width:2;rx:12}
+      .line-blue{fill:none;stroke:#3978B8;stroke-width:3;marker-end:url(#arrow-blue)}
+      .line-teal{fill:none;stroke:#19877D;stroke-width:3;marker-end:url(#arrow-teal)}
+      .line-amber{fill:none;stroke:#D57A27;stroke-width:3;marker-end:url(#arrow-amber)}
+      .line-red{fill:none;stroke:#C85060;stroke-width:2.5;marker-end:url(#arrow-red)}
+    </style>
+  </defs>
+  <rect width="1600" height="1000" fill="#F7F9FC"/>
+  <text x="52" y="58" class="title">UR20 Closed-Loop LLM Manipulation Framework</text>
+  <text x="54" y="86" class="subtitle">Hex-socket seating in a MuJoCo battery-disassembly scene · multimodal policy, guarded actions, physical success verification</text>
+  <rect x="1314" y="38" width="232" height="36" rx="18" fill="#E8F2FB"/>
+  <circle cx="1335" cy="56" r="6" fill="#3978B8"/><text x="1350" y="61" class="small" style="font-weight:700;fill:#315F8B">CLOSED-LOOP CONTROL</text>
+
+  <!-- Observation -->
+  <rect x="42" y="130" width="285" height="490" class="card"/>
+  <text x="64" y="166" class="section" fill="#3978B8">Observations</text>
+  <text x="64" y="190" class="small">Current view at every policy turn</text>
+  <rect x="62" y="208" width="245" height="105" rx="10" fill="#EAF1F7" stroke="#D4E0EA"/>
+  <rect x="73" y="219" width="105" height="69" rx="5" fill="#CAD8E5"/>
+  <path d="M80 269h90v13H80zM116 231h20v37h-20zM143 250h20v18h-20z" fill="#72879A"/>
+  <circle cx="153" cy="266" r="4" fill="#E0A34E"/>
+  <text x="81" y="304" class="tiny">AGENTVIEW</text>
+  <rect x="190" y="219" width="105" height="69" rx="5" fill="#D9E6F0"/>
+  <path d="M200 229h28v35h-16z" fill="#596F84"/><path d="M255 228l15 16-9 26h-13z" fill="#8799AA"/>
+  <circle cx="257" cy="266" r="6" fill="#E0A34E"/>
+  <text x="211" y="304" class="tiny">WRISTVIEW</text>
+  <text x="64" y="345" class="label">Robot &amp; task state</text>
+  <text x="70" y="371" class="body">• Joint positions / velocities</text>
+  <text x="70" y="396" class="body">• Tool / socket site positions</text>
+  <text x="70" y="421" class="body">• Engagement + stability state</text>
+  <rect x="62" y="443" width="245" height="91" rx="10" fill="#F0ECF8" stroke="#D8CDED" stroke-dasharray="5 4"/>
+  <text x="77" y="468" class="label" fill="#765DA8">Optional force feedback</text>
+  <text x="77" y="491" class="small">Raw &amp; compensated 6-axis wrench</text>
+  <text x="77" y="512" class="small">Peak wrench + force-control state</text>
+  <text x="64" y="574" class="tiny">Force, compliance and spiral are opt-in flags.</text>
+
+  <!-- Prompt context -->
+  <rect x="354" y="130" width="238" height="490" class="card"/>
+  <text x="376" y="166" class="section" fill="#3978B8">Prompt context</text>
+  <rect x="376" y="195" width="194" height="72" rx="10" fill="#EDF4FA" stroke="#D6E4F0"/>
+  <text x="392" y="221" class="label">Task goal</text>
+  <text x="392" y="244" class="small">Seat socket on M6 hex head</text>
+  <rect x="376" y="281" width="194" height="105" rx="10" fill="#EDF4FA" stroke="#D6E4F0"/>
+  <text x="392" y="307" class="label">Embodiment guidance</text>
+  <text x="392" y="331" class="small">Approach · align · descend</text>
+  <text x="392" y="352" class="small">Contact → force-guided search</text>
+  <text x="392" y="373" class="small">Stop at stable engagement</text>
+  <rect x="376" y="400" width="194" height="82" rx="10" fill="#EDF4FA" stroke="#D6E4F0"/>
+  <text x="392" y="426" class="label">Tool definitions</text>
+  <text x="392" y="450" class="small">move_joints · done</text>
+  <text x="392" y="471" class="small">Force / spiral if enabled</text>
+  <text x="376" y="516" class="small">Prior turns + execution feedback</text>
+  <text x="376" y="540" class="small">are returned on each loop.</text>
+  <text x="376" y="582" class="tiny">No give_up; done requires success.</text>
+
+  <!-- Multimodal model -->
+  <rect x="620" y="237" width="204" height="235" rx="18" fill="#F2EDFA" stroke="#8C75B8" stroke-width="2.5" filter="url(#shadow)"/>
+  <circle cx="722" cy="278" r="23" fill="#8C75B8"/>
+  <path d="M710 278h24M722 266v24M713 270l18 16M731 270l-18 16" stroke="#fff" stroke-width="2" opacity=".9"/>
+  <text x="722" y="325" text-anchor="middle" class="section" fill="#745AA3">Multimodal LLM</text>
+  <text x="722" y="354" text-anchor="middle" class="body">Luna · Terra · DeepSeek</text>
+  <text x="722" y="376" text-anchor="middle" class="body">Sol (configured profiles)</text>
+  <line x1="654" y1="395" x2="790" y2="395" stroke="#D8CDED"/>
+  <text x="722" y="421" text-anchor="middle" class="small">One tool call per turn</text>
+  <text x="722" y="444" text-anchor="middle" class="small">Closed-loop re-observation</text>
+
+  <!-- Flow into policy and from observation -->
+  <path d="M327 340 H339 V651 H610 V461 H620" class="line-blue"/>
+  <path d="M592 516 H604 V443 H620" class="line-blue"/>
+  <path d="M592 244 H604 V266 H620" class="line-blue"/>
+  <path d="M824 352 H851" class="line-teal"/>
+  <text x="830" y="333" class="tiny" fill="#19877D">decision</text>
+
+  <!-- LLM tool output -->
+  <rect x="855" y="130" width="270" height="306" class="card"/>
+  <text x="878" y="166" class="section" fill="#19877D">LLM output</text>
+  <text x="878" y="190" class="small">Structured function + arguments</text>
+  <rect x="876" y="210" width="228" height="137" rx="10" fill="#EAF5F2" stroke="#B9DED6"/>
+  <text x="894" y="238" class="label" fill="#16756D">move_joints(...)</text>
+  <text x="894" y="264" class="small">6 arm joint targets</text>
+  <text x="894" y="286" class="small">Socket velocity</text>
+  <text x="894" y="308" class="small">Optional force setpoint + spiral</text>
+  <text x="894" y="332" class="tiny">Plus a concise action rationale</text>
+  <rect x="876" y="362" width="228" height="53" rx="10" fill="#EDF3FA" stroke="#C8D8E8"/>
+  <text x="990" y="385" text-anchor="middle" class="label" fill="#3978B8">done()</text>
+  <text x="990" y="404" text-anchor="middle" class="tiny">accepted only after task success</text>
+
+  <!-- Action execution -->
+  <rect x="1155" y="130" width="403" height="306" class="card"/>
+  <text x="1178" y="166" class="section" fill="#C16D25">Action execution</text>
+  <rect x="1177" y="195" width="104" height="132" rx="10" fill="#EAF5F2" stroke="#19877D" stroke-width="2"/>
+  <text x="1229" y="222" text-anchor="middle" class="label" fill="#16756D">Adapter</text>
+  <text x="1229" y="248" text-anchor="middle" class="small">Joint target</text>
+  <text x="1229" y="269" text-anchor="middle" class="small">interpolation</text>
+  <text x="1229" y="294" text-anchor="middle" class="tiny">JSON-RPC worker</text>
+  <path d="M1283 260 H1303" class="line-teal"/>
+  <rect x="1308" y="195" width="102" height="132" rx="10" fill="#FFF4E8" stroke="#D57A27" stroke-width="2"/>
+  <text x="1359" y="222" text-anchor="middle" class="label" fill="#B85F17">Safety</text>
+  <text x="1359" y="249" text-anchor="middle" class="small">Clamp</text>
+  <text x="1359" y="270" text-anchor="middle" class="small">Delta limit</text>
+  <text x="1359" y="295" text-anchor="middle" class="tiny">Every action</text>
+  <path d="M1412 260 H1430" class="line-amber"/>
+  <rect x="1435" y="195" width="102" height="132" rx="10" fill="#FFF8EF" stroke="#D57A27" stroke-width="2"/>
+  <text x="1486" y="222" text-anchor="middle" class="label" fill="#B85F17">MuJoCo</text>
+  <text x="1486" y="249" text-anchor="middle" class="small">UR20 + tool</text>
+  <text x="1486" y="270" text-anchor="middle" class="small">Hex screw</text>
+  <text x="1486" y="295" text-anchor="middle" class="tiny">20 Hz control</text>
+  <path d="M1127 267 H1174" class="line-teal"/>
+  <text x="1150" y="248" text-anchor="middle" class="tiny" fill="#19877D">targets</text>
+  <text x="1178" y="362" class="small">Optional: axial compliance + bounded spiral search</text>
+  <text x="1178" y="387" class="small">Worker returns images, state, wrench &amp; task status</text>
+  <text x="1178" y="412" class="tiny">Paid API calls are recorded by budget transport.</text>
+
+  <!-- Task success / termination -->
+  <rect x="1050" y="495" width="508" height="168" rx="14" fill="#fff" stroke="#DCE5EE" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="1074" y="530" class="section" fill="#173A5E">Task evaluation &amp; termination</text>
+  <rect x="1074" y="548" width="288" height="88" rx="10" fill="#EDF4FA" stroke="#BFD1E2"/>
+  <text x="1090" y="574" class="label">Stable physical socket engagement</text>
+  <text x="1090" y="598" class="small">Geometric fit + contact, held ≥20 physics steps</text>
+  <text x="1090" y="619" class="tiny">No success from model declaration alone</text>
+  <rect x="1380" y="548" width="154" height="38" rx="9" fill="#E9F5EE" stroke="#9CC9AA"/>
+  <text x="1457" y="573" text-anchor="middle" class="label" fill="#348252">SUCCESS</text>
+  <rect x="1380" y="598" width="154" height="38" rx="9" fill="#FCEDEF" stroke="#E5B6BD"/>
+  <text x="1457" y="623" text-anchor="middle" class="label" fill="#B64858">STOP / ERROR</text>
+  <path d="M1486 329 V470 H1320 V492" class="line-amber"/>
+  <text x="1498" y="461" class="tiny" fill="#B85F17">each control step</text>
+  <text x="1448" y="646" class="tiny" text-anchor="middle">success · limits · API/runtime error</text>
+
+  <!-- feedback loop -->
+  <path d="M1050 584 H1008 V700 H186 V626" fill="none" stroke="#3978B8" stroke-width="3" marker-end="url(#arrow-blue)"/>
+  <rect x="497" y="678" width="326" height="43" rx="20" fill="#E8F2FB" stroke="#BCD2E6"/>
+  <text x="660" y="705" text-anchor="middle" class="label" fill="#315F8B">Updated observations + execution feedback</text>
+
+  <!-- done guard / call limit -->
+  <path d="M990 416 V465 H916 V492" class="line-blue"/>
+  <rect x="855" y="495" width="152" height="112" rx="12" fill="#F0ECF8" stroke="#B9A9D4" stroke-width="1.5"/>
+  <text x="931" y="524" text-anchor="middle" class="label" fill="#745AA3">Done guard</text>
+  <text x="931" y="549" text-anchor="middle" class="small">Rejects premature done</text>
+  <text x="931" y="572" text-anchor="middle" class="small">No give_up tool</text>
+  <text x="931" y="592" text-anchor="middle" class="tiny">call / step limits apply</text>
+  <path d="M1008 550 H1046" class="line-blue"/>
+
+  <!-- Optional live tools and artifacts -->
+  <text x="54" y="786" class="section" fill="#173A5E">Runtime controls &amp; artifacts</text>
+  <rect x="54" y="809" width="1492" height="111" rx="14" fill="#fff" stroke="#DCE5EE" stroke-width="1.5"/>
+  <rect x="78" y="833" width="250" height="62" rx="10" fill="#EDF4FA" stroke="#C8D8E8"/>
+  <text x="203" y="858" text-anchor="middle" class="label" fill="#3978B8">Optional live UI</text>
+  <text x="203" y="880" text-anchor="middle" class="small">TUI dashboard · MuJoCo viewer</text>
+  <path d="M330 864 H378" class="line-blue"/>
+  <rect x="384" y="833" width="304" height="62" rx="10" fill="#F3F6F9" stroke="#D7E0E8"/>
+  <text x="536" y="858" text-anchor="middle" class="label">Run records</text>
+  <text x="536" y="880" text-anchor="middle" class="small">API requests · actions · transcripts</text>
+  <path d="M690 864 H738" class="line-blue"/>
+  <rect x="744" y="833" width="252" height="62" rx="10" fill="#F3F6F9" stroke="#D7E0E8"/>
+  <text x="870" y="858" text-anchor="middle" class="label">Media</text>
+  <text x="870" y="880" text-anchor="middle" class="small">MP4 · camera frames</text>
+  <path d="M998 864 H1046" class="line-blue"/>
+  <rect x="1052" y="833" width="464" height="62" rx="10" fill="#FFF4E8" stroke="#E8C69E"/>
+  <text x="1284" y="858" text-anchor="middle" class="label" fill="#B85F17">Reproducible experiment configuration</text>
+  <text x="1284" y="880" text-anchor="middle" class="small">model / profile · state · call limit · step limit · optional sensing/control</text>
+
+  <text x="800" y="963" text-anchor="middle" class="small">Figure · Overview of the UR20 hex-socket seating framework using multimodal frontier models.</text>
+</svg>

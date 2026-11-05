@@ -27,7 +27,8 @@ def fake(request: httpx.Request) -> httpx.Response:
     index = len(calls)
     if index == 1:
         name = "move_to"
-        arguments = {"targets": {"socket_velocity": -10.0}, "note": "Offline mock: rotate the socket."}
+        arguments = {"targets": {"x": 0.25, "y": 0.0, "z": 0.4},
+                     "note": "Offline mock: move the Cartesian tool target."}
     else:
         name = "give_up"
         arguments = {"reason": "Offline tool-call check complete", "hindsight": "worker and action schema verified"}

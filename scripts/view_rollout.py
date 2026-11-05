@@ -6,6 +6,7 @@ Usage: python scripts/view_rollout.py outputs/<budgeted-run> --serve
 from __future__ import annotations
 
 import argparse
+import datetime
 import html
 import json
 import math
@@ -38,6 +39,13 @@ def _safe_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False).replace("</", "<\\/")
 
 
+def _canonical_model(value: str) -> str:
+    for provider in ("openai/", "anthropic/", "google/"):
+        if value.startswith(provider):
+            return value[len(provider):]
+    return value
+
+
 def _episode_context(source: Path, episode: int) -> tuple[Path, Path, dict, dict]:
     source = source.resolve()
     if source.name == "inspect":
@@ -67,6 +75,8 @@ def _episode_context(source: Path, episode: int) -> tuple[Path, Path, dict, dict
     summary = _load_json(summary_path) if summary_path.is_file() else {}
     results = summary.get("results") or []
     row = next((item for item in results if item.get("episode") == episode), {})
+    if not row and summary.get("status"):
+        row = summary
     return run_dir, episode_dir, log, row
 
 
@@ -172,6 +182,13 @@ def _trajectory(inspect_dir: Path, log: dict, initial: list[float] | None) -> li
     return points
 
 
+def _inspect_directory(run_dir: Path, episode_dir: Path) -> Path:
+    inspect_dir = episode_dir / "inspect"
+    if not inspect_dir.is_dir() and (run_dir / "inspect").is_dir():
+        return run_dir / "inspect"
+    return inspect_dir
+
+
 def _video_path(run_dir: Path, episode_dir: Path, result: dict) -> Path | None:
     candidate = Path(result["video"]) if result.get("video") else None
     if candidate and candidate.is_file():
@@ -182,9 +199,7 @@ def _video_path(run_dir: Path, episode_dir: Path, result: dict) -> Path | None:
     existing = next(iter(sorted(run_dir.glob("**/rollout.mp4"))), None)
     if existing:
         return existing.resolve()
-    inspect_dir = episode_dir / "inspect"
-    if not inspect_dir.is_dir() and (run_dir / "inspect").is_dir():
-        inspect_dir = run_dir / "inspect"
+    inspect_dir = _inspect_directory(run_dir, episode_dir)
     frame_dirs = sorted((inspect_dir / "frames").glob("*")) if (inspect_dir / "frames").is_dir() else []
     if not frame_dirs:
         return None
@@ -201,7 +216,7 @@ def _video_path(run_dir: Path, episode_dir: Path, result: dict) -> Path | None:
 
 
 def _dashboard_data(run_dir: Path, episode_dir: Path, log: dict, result: dict) -> dict:
-    inspect_dir = episode_dir / "inspect"
+    inspect_dir = _inspect_directory(run_dir, episode_dir)
     messages = _transcript_messages(log)
     calls = _parse_calls(messages)
     trajectory = _trajectory(inspect_dir, log, _initial_position(messages))
@@ -252,14 +267,27 @@ def render_dashboard(data: dict) -> str:
         if data["video"] else '<div class="empty-video">No rollout video was saved for this episode.</div>'
     )
     rollout_options = "".join(
-        f'<option value="{escaped(item["url"])}"{" selected" if item["selected"] else ""}>'
+        f'<option value="{escaped(item["url"])}" data-model="{escaped(_canonical_model(item.get("model", "")))}" '
+        f'data-date="{escaped(item.get("date", ""))}" data-scene="{escaped(item.get("scene", ""))}" '
+        f'data-outcome="{escaped(item.get("outcome", ""))}"'
+        f'{" selected" if item["selected"] else ""}>'
         f'{escaped(item["label"])}</option>'
         for item in data.get("rollouts", [])
     )
+    def filter_options(key: str, label: str) -> str:
+        values = sorted({(_canonical_model(item.get(key, "")) if key == "model" else item.get(key, ""))
+                         for item in data.get("rollouts", []) if item.get(key, "")},
+                        reverse=key == "date")
+        choices = ''.join(f'<option value="{escaped(value)}">{escaped(value)}</option>' for value in values)
+        return f'<label>{label}<select class="rollout-filter" data-filter="{key}"><option value="">All</option>{choices}</select></label>'
+
     rollout_selector = (
-        '<div class="run-picker"><label for="rollout-search">Search rollouts</label>'
-        '<input id="rollout-search" type="search" placeholder="model / suite / task / folder / status">'
-        f'<select id="rollout-picker">{rollout_options}</select></div>'
+        '<div class="run-picker"><div class="filter-row">'
+        '<label for="rollout-search">Search<input id="rollout-search" type="search" placeholder="run / task / state / status"></label>'
+        f'{filter_options("model", "Model")}{filter_options("date", "Date")}'
+        f'{filter_options("scene", "Scene")}{filter_options("outcome", "Outcome")}'
+        f'</div><div class="select-row"><label for="rollout-picker">Matching rollouts</label>'
+        f'<select id="rollout-picker">{rollout_options}</select><span id="rollout-count" class="hint"></span></div></div>'
         if rollout_options else ""
     )
     return """<!doctype html>
@@ -270,7 +298,7 @@ def render_dashboard(data: dict) -> str:
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--white);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1440px;margin:auto;padding:26px 28px 48px}.eyebrow{font-size:11px;letter-spacing:.16em;font-weight:800;color:var(--blue)}h1{font-size:38px;line-height:1.1;letter-spacing:-.035em;margin:14px 0 16px}.subtitle{color:var(--blue);font-weight:750;font-size:16px;margin-bottom:34px}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:10px;background:#101f2e;overflow:hidden;margin-bottom:34px}.stat{padding:14px 18px;text-align:center;border-right:1px solid var(--line)}.stat:last-child{border:0}.label{display:block;color:#aac0d2;text-transform:uppercase;letter-spacing:.06em;font-size:10px;margin-bottom:5px}.value{font-size:17px;font-weight:800}.failure{color:var(--orange)}.success{color:#77e0aa}
-.run-picker{display:flex;align-items:center;gap:12px;margin:0 0 18px;color:var(--muted);font-size:12px;flex-wrap:wrap}.run-picker input,.run-picker select{background:var(--panel);color:var(--white);border:1px solid var(--line);border-radius:7px;padding:9px 12px}.run-picker input{width:min(360px,100%)}.run-picker select{max-width:min(760px,100%);flex:1}
+.run-picker{display:grid;gap:10px;margin:0 0 18px;color:var(--muted);font-size:12px}.filter-row,.select-row{display:flex;align-items:end;gap:10px;flex-wrap:wrap}.run-picker label{display:grid;gap:5px}.run-picker input,.run-picker select{background:var(--panel);color:var(--white);border:1px solid var(--line);border-radius:7px;padding:9px 12px;min-width:150px}.run-picker input{width:min(300px,80vw)}.run-picker select{max-width:min(760px,100%)}.select-row #rollout-picker{flex:1;min-width:min(420px,90vw)}
 .columns{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}.section-title{font-size:16px;margin:0 0 15px;font-weight:780}.video-wrap{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#000;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}video{width:100%;height:100%;object-fit:contain}.empty-video{color:var(--muted);padding:24px}.hint{font-size:12px;color:var(--muted);margin:10px 0 0}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:15px}.plot-head{display:flex;align-items:center;justify-content:space-between;color:var(--muted);font-size:11px;margin-bottom:10px}.toggle{border:1px solid var(--line);border-radius:8px;padding:7px 11px;color:#c0d1df;font-size:11px}.plot{display:block;width:100%;height:330px;background:radial-gradient(ellipse at 48% 48%,#12283b 0%,#091724 74%);border:1px solid #29465e;border-radius:9px}.legend{display:flex;gap:12px;align-items:center;border:1px solid #29465e;background:#0b1a27;border-radius:8px;padding:7px 10px;font-size:10px;color:#bdcbd8}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--blue);margin-right:5px}.diamond{display:inline-block;width:8px;height:8px;background:#ffae69;transform:rotate(45deg);margin-right:6px}.plot-controls{display:flex;gap:12px;align-items:center;margin:12px 2px 0}.plot-controls button{background:#193249;border:1px solid #41627b;color:#e3edf6;border-radius:8px;padding:10px 13px;font-weight:700;white-space:nowrap}.progress{flex:1;min-width:0}.progress-label{font-size:11px;color:#b6ccdc;font-weight:700;margin-bottom:5px}input[type=range]{width:100%;accent-color:var(--blue)}.plan-note{border-left:3px solid var(--blue);background:#0b1a27;color:#d0dce7;margin-top:10px;padding:12px;font-size:12px;min-height:48px}
 .timeline{margin-top:16px}.timeline-head{display:flex;align-items:center;justify-content:space-between;color:var(--blue);font-weight:800;margin-bottom:12px}.timeline-list{max-height:420px;overflow:auto;display:grid;gap:10px;padding-right:5px}.event{background:#0a1723;border:1px solid #294156;border-radius:9px;padding:13px;cursor:pointer}.event:hover,.event.active{border-color:#58b7f4;background:#102131}.event-top{display:flex;gap:10px;align-items:center;color:var(--muted);font-size:11px}.time{min-width:72px;text-align:center;border:1px solid #59b6f4;border-radius:5px;color:var(--blue);font-weight:750;padding:3px}.event-title{color:#edf5fc;font-weight:750}.event-note{margin:9px 0 0;color:#d0dce7;line-height:1.55}.target{font-size:10px;color:var(--muted);margin-top:8px}.error{margin-top:16px;color:#ffc1ad;background:#2b1b1a;border:1px solid #70463e;border-radius:8px;padding:11px;overflow-wrap:anywhere}
@@ -306,12 +334,18 @@ const minY=Math.min(...projectedRaw.map(point=>point.y)),maxY=Math.max(...projec
 const centerX=(minX+maxX)/2,centerY=(minY+maxY)/2;
 const scale=Math.min(520/Math.max(maxX-minX,.01),260/Math.max(maxY-minY,.01));
 function project(point){return [300+(point.x-point.y-centerX)*scale,175+(-point.z*1.45+(point.x+point.y)*.42-centerY)*scale];}
+const maxStep=Math.max(1,...points.map(point=>Number(point.t)||0));
 function drawPlot(progress=1){svg.replaceChildren();
  const axisOrigin={x:0,y:0,z:0};
  const axes=[{end:{x:.42,y:0,z:0},color:'#e98273',label:'x'},{end:{x:0,y:.42,z:0},color:'#6ed7a3',label:'y'},{end:{x:0,y:0,z:.45},color:'#72c8ff',label:'z'}];
  for(const axis of axes){const origin=project(axisOrigin),end=project({x:axisOrigin.x+axis.end.x,y:axisOrigin.y+axis.end.y,z:axisOrigin.z+axis.end.z});svg.append(el('line',{x1:origin[0],y1:origin[1],x2:end[0],y2:end[1],stroke:axis.color,'stroke-width':2}));const label=el('text',{x:end[0]+5,y:end[1]+3,fill:axis.color,'font-size':12});label.textContent=axis.label;svg.append(label);}
  if(points.length<1){const text=el('text',{x:300,y:175,fill:'#9aabba','text-anchor':'middle','font-size':13});text.textContent='No executed trajectory in this rollout';svg.append(text);return;}
- const visible=Math.min(points.length,Math.max(1,Math.ceil(points.length*progress)));const projected=points.slice(0,visible).map(project);
+ const currentStep=Math.max(0,Math.min(maxStep,progress*maxStep));
+ let visible=points.filter(point=>(Number(point.t)||0)<=currentStep);
+ if(!visible.length)visible=[points[0]];
+ const nextIndex=points.findIndex(point=>(Number(point.t)||0)>currentStep);
+ if(nextIndex>0){const previous=points[nextIndex-1],next=points[nextIndex],span=(Number(next.t)||0)-(Number(previous.t)||0);const fraction=span>0?(currentStep-(Number(previous.t)||0))/span:0;visible=[...visible,{x:previous.x+(next.x-previous.x)*fraction,y:previous.y+(next.y-previous.y)*fraction,z:previous.z+(next.z-previous.z)*fraction,t:currentStep}];}
+ const projected=visible.map(project);
  if(projected.length>1){svg.append(el('polyline',{points:projected.map(p=>p.join(',')).join(' '),fill:'none',stroke:'#72c8ff','stroke-width':3,'stroke-linecap':'round','stroke-linejoin':'round'}));}
  for(let index=0;index<projected.length;index+=Math.max(1,Math.floor(projected.length/18))){svg.append(el('circle',{cx:projected[index][0],cy:projected[index][1],r:3,fill:'#9bd9ff',opacity:.7}));}
  const current=projected[projected.length-1];svg.append(el('circle',{cx:current[0],cy:current[1],r:7,fill:'#72c8ff',stroke:'#d7f1ff','stroke-width':2}));
@@ -320,12 +354,12 @@ drawPlot();
 const timeline=document.getElementById('timeline');
 if(!events.length){timeline.innerHTML='<div class="event"><div class="event-top">No model tool calls recorded</div><div class="event-note">The run ended before the model could issue an action.</div></div>';}
 events.forEach((event,index)=>{const args=event.arguments||{},card=document.createElement('article');card.className='event';
- const time=Number(event.step||0)/20;const stamp=`${Math.floor(time/60)}:${(time%60).toFixed(1).padStart(4,'0')}`;
+ const eventStep=Number(event.step||0);const time=video&&video.duration?eventStep/maxStep*video.duration:eventStep/20;const stamp=`${Math.floor(time/60)}:${(time%60).toFixed(1).padStart(4,'0')}`;
  const targets=args.targets?JSON.stringify(args.targets):'';
  card.innerHTML=`<div class="event-top"><span class="time">${stamp}</span><span class="event-title">Plan ${index+1}</span><span>${event.name}</span></div><div class="event-note"></div><div class="target"></div>`;
  card.querySelector('.event-note').textContent=args.note||args.reason||args.hindsight||'';
  card.querySelector('.target').textContent=targets?`Target: ${targets}`:'';
- card.addEventListener('click',()=>{document.querySelectorAll('.event.active').forEach(node=>node.classList.remove('active'));card.classList.add('active');if(video&&video.duration)video.currentTime=Math.min(time,video.duration);else{document.getElementById('progress').value=events.length>1?index/(events.length-1)*100:100;drawPlot(events.length>1?index/(events.length-1):1);}document.getElementById('plan-note').textContent=args.note||args.reason||'Selected action';});
+ card.addEventListener('click',()=>{document.querySelectorAll('.event.active').forEach(node=>node.classList.remove('active'));card.classList.add('active');const fraction=eventStep/maxStep;if(video&&video.duration)video.currentTime=Math.min(time,video.duration);document.getElementById('progress').value=fraction*100;drawPlot(fraction);document.getElementById('plan-note').textContent=args.note||args.reason||'Selected action';});
  timeline.append(card);
 });
 document.getElementById('plan-note').textContent=points.length?`${points.length} end-effector positions from recorded actions.`:'No action trajectory was recorded for this episode.';
@@ -335,8 +369,14 @@ function syncPlayback(){if(!video||!video.duration)return;const fraction=video.c
 if(video){video.addEventListener('timeupdate',syncPlayback);video.addEventListener('seeked',syncPlayback);}
 const picker=document.getElementById('rollout-picker');
 const search=document.getElementById('rollout-search');
-if(search&&picker){search.addEventListener('input',()=>{const query=search.value.trim().toLowerCase();for(const option of picker.options){option.hidden=Boolean(query)&&!option.text.toLowerCase().includes(query);}const visible=[...picker.options].find(option=>!option.hidden);if(visible&&picker.selectedOptions[0]?.hidden)picker.value=visible.value;});}
-if(picker)picker.addEventListener('change',()=>{location.href=picker.value;});
+const filters=[...document.querySelectorAll('.rollout-filter')];
+function filterRollouts(){if(!picker)return;const query=(search?.value||'').trim().toLowerCase();let visible=[];for(const option of picker.options){const matchesQuery=!query||option.text.toLowerCase().includes(query);const matchesFilters=filters.every(filter=>!filter.value||option.dataset[filter.dataset.filter]===filter.value);option.hidden=!(matchesQuery&&matchesFilters);if(!option.hidden)visible.push(option);}document.getElementById('rollout-count').textContent=`${visible.length} matching`;if(visible.length&&picker.selectedOptions[0]?.hidden)picker.value=visible[0].value;}
+if(search)search.addEventListener('input',filterRollouts);filters.forEach(filter=>filter.addEventListener('change',filterRollouts));filterRollouts();
+const params=new URLSearchParams(location.search);
+if(search)search.value=params.get('q')||'';
+filters.forEach(filter=>{filter.value=params.get(filter.dataset.filter)||'';});
+function persistPickerState(){const state=new URLSearchParams();if(search?.value)state.set('q',search.value);filters.forEach(filter=>{if(filter.value)state.set(filter.dataset.filter,filter.value);});return state.toString();}
+if(picker)picker.addEventListener('change',()=>{const query=persistPickerState();location.href=picker.value+(query?`?${query}`:'');});
 </script></body></html>""".replace("__VIDEO__", video_panel).replace("__DATA__", _safe_json(data)).replace("__ROLLOUT_SELECTOR__", rollout_selector)
 
 
@@ -345,7 +385,8 @@ def _rollout_entries(root: Path) -> list[tuple[Path, int, dict, dict]]:
     seen = set()
     inspect_dirs = sorted(
         path for path in root.rglob("inspect")
-        if path.is_dir() and not any(part.startswith("_trash_") for part in path.relative_to(root).parts)
+        if path.is_dir() and not any(part.startswith(("_trash_", "_archive_"))
+                                      for part in path.relative_to(root).parts)
     )
     for inspect_dir in inspect_dirs:
         if not list(inspect_dir.glob("*.json")):
@@ -406,10 +447,25 @@ def main() -> None:
         except ValueError:
             folder_label = entry_run.name
         model_label = protocol.get("model") or (entry_log.get("eval", {}).get("policy_config", {}).get("model", ""))
-        label = (f"{folder_label}/episode_{episode:02d} · {model_label} · "
-                 f"{result.get('status', 'recorded')} · {result.get('steps', '—')} steps")
+        scene_label = protocol.get("suite") or protocol.get("scene") or entry_log.get("eval", {}).get("task", "")
+        if not scene_label:
+            path_parts = [part.lower() for part in entry_run.relative_to(catalog_root).parts]
+            scene_label = next((part for part in path_parts if part.startswith("libero_")), "")
+        if not scene_label and any("ur20" in part.lower() for part in entry_run.parts):
+            scene_label = "ur20_screw_station"
+        if not scene_label:
+            scene_label = "unknown"
+        date_match = re.search(r"(?<!\d)(20\d{6})(?!\d)", entry_run.as_posix())
+        if date_match:
+            run_date = f"{date_match.group(1)[:4]}-{date_match.group(1)[4:6]}-{date_match.group(1)[6:8]}"
+        else:
+            run_date = datetime.datetime.fromtimestamp(entry_run.stat().st_mtime).strftime("%Y-%m-%d")
+        outcome_label = str(result.get("status") or entry_log.get("status") or "recorded").replace("_", " ")
+        label = (f"{folder_label}/episode_{episode:02d} · {model_label or 'unknown model'} · "
+                 f"{scene_label} · {outcome_label} · {result.get('steps', '—')} steps")
         catalog.append({"run": entry_run, "episode": episode, "report": report_name,
-                        "label": label, "model": protocol.get("model", "")})
+                        "label": label, "model": model_label or "unknown",
+                        "date": run_date, "scene": scene_label, "outcome": outcome_label})
     selected_report = run_dir / f"rollout_inspector_ep{args.episode:02d}.html"
     for entry_run, episode, log, result in entries:
         candidate_episode = entry_run / f"episode_{episode:02d}"
@@ -418,7 +474,9 @@ def main() -> None:
         data["rollouts"] = [
             {"url": quote(os.path.relpath(item['run'] / item['report'], start=entry_run), safe="/"),
              "label": item["label"],
-             "selected": item["run"] == entry_run and item["episode"] == episode}
+             "selected": item["run"] == entry_run and item["episode"] == episode,
+             "model": item["model"], "date": item["date"],
+             "scene": item["scene"], "outcome": item["outcome"]}
             for item in catalog
         ]
         report = entry_run / f"rollout_inspector_ep{episode:02d}.html"

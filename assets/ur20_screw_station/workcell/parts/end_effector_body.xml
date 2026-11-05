@@ -1,4 +1,5 @@
 <body name="end_effector_parts">
+  <site name="ft_sensor_site" pos="0 0 0" quat="0.70710678 0 0.70710678 0" size="0.001" rgba="0 0 0 0" />
   <!-- 这个文件是“零件片段”：include 时根 body 会被剥掉，下面内容合并到外层 body。
        外层 body 的名字/位姿由 end_effector.xml 或 scene.xml 决定。 -->
 

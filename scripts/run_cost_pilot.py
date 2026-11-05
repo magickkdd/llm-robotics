@@ -30,7 +30,7 @@ MODEL_LABELS = {
     'openai/gpt-6-luna': 'luna',
     'openai/gpt-6-sol': 'sol',
     'openai/gpt-6-astra': 'astra',
-    'openai/gpt-6.1-sol': 'gpt_6_1_sol',
+    'openai/gpt-6.1-sol': 'gpt_6_1_sol61',
 }
 CONFIGURATIONS = [
     {'id': MODEL_LABELS[m] + '_' + e, 'model': m, 'effort': e}
@@ -93,8 +93,14 @@ def main():
     selected = [next(c for c in CONFIGURATIONS if c['id'] == ident) for ident in selected_ids]
     selected_models = list(dict.fromkeys(c['model'] for c in selected))
     settings = {**read_dotenv(ROOT / '.env'), **os.environ}
-    if not settings.get('OPENAI_API_KEY'):
+    sol_profile = 'openai/gpt-6.1-sol' in selected_models
+    standard_models = any(model != 'openai/gpt-6.1-sol' for model in selected_models)
+    if standard_models and not settings.get('OPENAI_API_KEY'):
         p.error('OPENAI_API_KEY is missing from .env and the environment')
+    if sol_profile and not settings.get('OPENAI_API_KEY_SOL61'):
+        p.error('OPENAI_API_KEY_SOL61 is missing from .env and the environment')
+    if sol_profile and not settings.get('OPENAI_BASE_URL_SOL61'):
+        p.error('OPENAI_BASE_URL_SOL61 is missing from .env and the environment')
     os.umask(0o077)
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -105,6 +111,7 @@ def main():
         'max_output_tokens': args.max_output_tokens, 'total_budget_usd': args.total_budget,
         'per_run_budget_usd': args.per_run_budget,
         'zero_shot': True, 'service_tier': 'default', 'wire': 'responses',
+        'api_base_url_by_model': {'openai/gpt-6.1-sol': settings.get('OPENAI_BASE_URL_SOL61')},
         'python': platform.python_version(),
         'project_commit': subprocess.run(['git','rev-parse','HEAD'],cwd=ROOT,check=True,
                                          capture_output=True,text=True).stdout.strip(),
@@ -138,10 +145,16 @@ def main():
                 continue
             folder = out/row['id']
             run_budget = min(args.per_run_budget, remaining)
+            row_uses_sol_profile = row['model'] == 'openai/gpt-6.1-sol'
+            key_env = 'OPENAI_API_KEY_SOL61' if row_uses_sol_profile else 'OPENAI_API_KEY'
+            base_url = settings.get('OPENAI_BASE_URL_SOL61') if row_uses_sol_profile else None
+            policy_base_url = base_url
+            if base_url and not base_url.rstrip('/').endswith('/v1'):
+                policy_base_url = base_url.rstrip('/') + '/v1'
             transport = BudgetTransport(folder/'api', run_budget, run_budget,
                 inner=httpx.HTTPTransport(retries=0), task_id=args.task_id,
                 max_calls=args.max_calls, model=row['model'], image_horizon=2,
-                max_output_tokens=args.max_output_tokens)
+                max_output_tokens=args.max_output_tokens, base_url=base_url)
             transport.begin_episode(0)
             env = RecordedEmbodiment(task_id=args.task_id, output_dir=folder/'sim',
                                       libero_python=settings.get('LIBERO_PYTHON'))
@@ -151,7 +164,8 @@ def main():
             save()
             print(f"Starting {row['id']}; run cap ${run_budget:.2f}, sweep remaining ${remaining:.4f}", flush=True)
             try:
-                policy = agent_policy(model=row['model'], env={'OPENAI_API_KEY': settings['OPENAI_API_KEY']},
+                policy = agent_policy(model=row['model'].partition('/')[2] if base_url else row['model'],
+                    base_url=policy_base_url, api_key_env=key_env, env={key_env: settings[key_env]},
                     wire='responses', effort=row['effort'], max_llm_calls=args.max_calls,
                     image_horizon=2,
                     prior_learnings=None, transport=transport, wire_capture=False)

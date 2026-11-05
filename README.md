@@ -126,12 +126,14 @@ OPENAI_BASE_URL_TERRA=https://spacetimeai.cc
 OPENAI_API_KEY_DEEPSEEK=...
 OPENAI_BASE_URL_DEEPSEEK=https://discovery-api.intern-ai.org.cn/v1
 OPENAI_API_KEY_SOL61=...
-OPENAI_BASE_URL_SOL61=https://max2.jojocode.com
+OPENAI_BASE_URL_SOL61=https://api.diosirapi.co.uk/v1
 ```
 
 Select the matching profile at launch with `--profile luna`, `--profile terra`,
 `--profile deepseek`, or `--profile sol61`; the generic `OPENAI_API_KEY` and `OPENAI_BASE_URL`
 remain available for runs without `--profile`.
+The `sol61` profile now runs `openai/gpt-6.1-sol` through the Diosir Responses API;
+the key value is left blank in `.env.example` for you to fill in.
 
 Run commands from the repo root so `.env` is found. Variables already set in
 your shell take precedence.
@@ -419,6 +421,9 @@ Only models with a price row are accepted: `openai/gpt-6-astra`,
 Spacetime Responses endpoint but has not yet been tested. Its local budget
 estimate temporarily reuses the Astra price row because Terra's channel price
 has not been verified; this is not a confirmed rate or guaranteed upper bound.
+The Diosir `openai/gpt-6.1-sol` local reservation uses a conservative placeholder
+rate until the Diosir channel's billing rates are confirmed; the provider's bill
+remains authoritative.
 To add
 one, put its per-million-token prices in `PRICING` in
 `src/inspect_robots_libero/budget.py`. A new provider also needs entries in

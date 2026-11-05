@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 
 def _ffmpeg() -> str:
@@ -64,6 +65,40 @@ def encode_frames(frame_dir: Path, output: Path) -> int:
         raise RuntimeError(f"ffmpeg failed: {stderr.decode(errors='replace')[-2000:]}")
     print(f"encoded {len(frames)} frames to {output}")
     return len(frames)
+
+
+def encode_jpeg_frames(frame_dir: Path, output: Path, fps: int = 20) -> int:
+    paths = sorted(frame_dir.glob("ur20_video_*.jpg"))
+    if not paths:
+        raise ValueError(f"No UR20 video frames found in {frame_dir}")
+    first = np.asarray(Image.open(paths[0]).convert("RGB"), dtype=np.uint8)
+    height, width = first.shape[:2]
+    command = [_ffmpeg(), "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+               "-s", f"{width}x{height}", "-r", str(fps), "-i", "pipe:0", "-an",
+               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+               str(output)]
+    with tempfile.TemporaryFile() as stderr_file:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                   stderr=stderr_file)
+        try:
+            assert process.stdin is not None
+            for path in paths:
+                image = first if path == paths[0] else np.asarray(
+                    Image.open(path).convert("RGB"), dtype=np.uint8
+                )
+                process.stdin.write(np.ascontiguousarray(image).tobytes())
+            process.stdin.close()
+            status = process.wait()
+            stderr_file.seek(0)
+            stderr = stderr_file.read()
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+    if status:
+        raise RuntimeError(f"ffmpeg failed: {stderr.decode(errors='replace')[-2000:]}")
+    print(f"encoded {len(paths)} real-time UR20 frames to {output} at {fps} FPS")
+    return len(paths)
 
 
 def main() -> None:

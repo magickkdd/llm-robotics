@@ -66,7 +66,8 @@ PRICING={
     'openai/gpt-6-luna':(0.10,0.01,0.125,0.50),
     'openai/gpt-6.1-terra':(10.,1.,12.5,50.),
     'openai/gpt-6-sol':(2.,0.2,2.5,10.),
-    'openai/gpt-6.1-sol':(2.,0.1,2.5,10.),
+    # Conservative local reservation for the Diosir-hosted GPT-6.1-SOL profile.
+    'openai/gpt-6.1-sol':(10.,1.,12.5,50.),
     # DeepSeek public peak rates used as a conservative local estimate for OpenAI-compatible gateways.
     'openai/deepseek-v4.1-flash-1017':(0.30,0.006,0.30,1.20),
     'anthropic/claude-opus-5-5':(4.,0.2,5.,20.),

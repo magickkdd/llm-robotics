@@ -24,14 +24,18 @@ def main() -> None:
             mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_EQUALITY, index)
             for index in range(model.neq)
         }
-        assert equalities == {"screw_helix"}
+        assert equalities == {"screw_rotation_lock", "screw_height_lock"}
         assert model.geom_type[worker.screw_head_geom_id] == mujoco.mjtGeom.mjGEOM_MESH
         assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "tool_lift") == -1
         assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "wristview") >= 0
         assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "closeup") == -1
         wrist_camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "wristview")
-        assert 0.39 <= model.cam_pos[wrist_camera_id, 0] <= 0.43
-        assert 0.04 <= abs(model.cam_pos[wrist_camera_id, 1]) <= 0.07
+        assert 0.25 <= model.cam_pos[wrist_camera_id, 0] <= 0.27
+        assert mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY,
+                                 model.cam_bodyid[wrist_camera_id]) == "end_effector"
+        assert model.cam_mode[wrist_camera_id] == mujoco.mjtCamLight.mjCAMLIGHT_FIXED
+        camera_forward = -data.cam_xmat[wrist_camera_id].reshape(3, 3)[:, 2]
+        assert np.allclose(camera_forward, [0.0, 0.0, -1.0], atol=1e-5)
         battery_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "battery_collision")
         assert abs(model.geom_pos[battery_geom_id, 2] + model.geom_size[battery_geom_id, 2] - 0.148) < 1e-6
         battery_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "battery")
@@ -47,6 +51,7 @@ def main() -> None:
                               data.site_xpos[mount_id]) < 1e-6
 
         starts = []
+        rotations = []
         for state_id in range(10):
             initial = worker.reset(state_id)
             repeated = worker.reset(state_id)
@@ -58,7 +63,15 @@ def main() -> None:
             assert np.linalg.norm(np.asarray(initial["sites"]["tool_tip"]) -
                                   worker.data.geom_xpos[worker.screw_head_geom_id]) >= 0.13
             starts.append(initial["sites"]["tool_tip"][:2])
+            rotations.append(float(worker.data.qpos[worker.screw_spin_qpos]))
         assert len({tuple(np.round(position, 5)) for position in starts}) == 10
+        assert len({round(angle, 6) for angle in rotations}) == 10
+        assert all(abs(angle % (np.pi / 3.0)) > 1e-6 for angle in rotations)
+        assert WORKER_MODULE.SPIRAL_SEARCH_MAX_RADIUS_M == 0.008
+        assert np.isclose(
+            WORKER_MODULE.SPIRAL_SEARCH_MAX_RADIUS_M / WORKER_MODULE.SPIRAL_SEARCH_POINTS,
+            0.00025,
+        )
 
         worker.reset(0)
         target = np.array([0.8, 1.0, 0.145])
@@ -73,9 +86,14 @@ def main() -> None:
             data.qpos[:6] += arm_jacobian.T @ np.linalg.solve(
                 arm_jacobian @ arm_jacobian.T + 1e-5 * np.eye(3), error
             )
-        data.ctrl[:6] = data.qpos[:6]
-        result = worker.step([*data.qpos[:6], -1.0], count=1000)
+        data.ctrl[:6] = 0.0
+        worker.osc_target_position = data.site_xpos[worker.tool_tip_id].copy()
+        worker.osc_target_rotation = data.site_xmat[worker.tool_tip_id].reshape(3, 3).copy()
+        result = worker.step([0.0] * 3, socket_velocity=-1.0, count=1000)
         assert result["engaged_seen"]
+        assert abs(float(data.qpos[worker.screw_spin_qpos]) -
+                   WORKER_MODULE.INITIAL_ROTATIONS[0]) < 1e-5
+        assert abs(float(data.qpos[worker.screw_lift_qpos])) < 1e-5
 
         worker.reset(0)
         target = np.array([0.8, 1.0, 0.12])
@@ -92,9 +110,12 @@ def main() -> None:
             )
         target_joints = data.qpos[:6].copy()
         worker.reset(0)
-        data.ctrl[:6] = target_joints
-        for _ in range(2000):
-            mujoco.mj_step(model, data)
+        data.qpos[:6] = target_joints
+        data.ctrl[:6] = 0.0
+        mujoco.mj_forward(model, data)
+        worker.osc_target_position = data.site_xpos[worker.tool_tip_id].copy()
+        worker.osc_target_rotation = data.site_xmat[worker.tool_tip_id].reshape(3, 3).copy()
+        worker.step([0.0] * 3, count=2000)
         battery_top = model.geom_pos[battery_geom_id, 2] + model.geom_size[battery_geom_id, 2]
         assert data.site_xpos[worker.tool_tip_id, 2] >= battery_top - 0.003
         assert any(

@@ -13,7 +13,7 @@ def main() -> None:
         print("reset cameras:", sorted(observation.images), "state:", sorted(observation.state))
         action = np.array([*observation.state["joint_pos"][:6], 0.0])
         result = embodiment.step(Action(action))
-        print("step:", result.observation.state["sites"].reshape(3, 3).tolist())
+        print("step joint position:", result.observation.state["joint_pos"].tolist())
     finally:
         embodiment.close()
 
