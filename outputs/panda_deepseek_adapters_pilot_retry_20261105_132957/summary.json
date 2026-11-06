@@ -1,0 +1,61 @@
+{
+  "protocol": {
+    "model": "openai/deepseek-v4.1-flash-1017",
+    "suite": "libero_10",
+    "wire": "responses",
+    "api_base_url": "https://discovery-api.intern-ai.org.cn/v1",
+    "task_id": 0,
+    "task_name": "LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket",
+    "instruction": "put both the alphabet soup and the tomato sauce in the basket",
+    "episodes": 1,
+    "initial_state_ids": [
+      0
+    ],
+    "env_seeds": [
+      142
+    ],
+    "max_steps": 60,
+    "max_api_attempts_per_episode": 3,
+    "allow_model_give_up": false,
+    "require_environment_success_for_done": true,
+    "reasoning_effort": null,
+    "image_horizon": 2,
+    "max_output_tokens": 8192,
+    "request_timeout_s": 600.0,
+    "total_budget": 0.25,
+    "episode_budget": 0.25,
+    "zero_shot": true,
+    "task_notes": false,
+    "force_feedback": true,
+    "vision_assist": true,
+    "compliant_control": true,
+    "compliant_axis": "z",
+    "compliant_target_force_n": -2.0,
+    "compliant_contact_threshold_n": 1.0,
+    "compliant_gain_m_per_n": 0.0003,
+    "demonstrations": false,
+    "prior_learnings": null,
+    "upstream_commit": "4d35fe4b81a643c0e61e8d287810b3c26f9d386a",
+    "budget_note": "Conservative local reservations; provider billing remains authoritative."
+  },
+  "results": [
+    {
+      "episode": 0,
+      "scene": "libero_10_task00_init00",
+      "status": "incomplete_budget",
+      "environment_success": false,
+      "framework_status": "success",
+      "metrics": {
+        "success_at_end": 0.0
+      },
+      "steps": 36,
+      "api_attempts": 3,
+      "estimated_usd": 0.028992432000000002,
+      "budget_charge_usd": 0.0322476,
+      "stop_detail": null,
+      "video": "/home/czx/LLM_LIBERO/outputs/panda_deepseek_adapters_pilot_retry_20261105_132957/episode_00/20261105-132957_task00_init00/rollout.mp4"
+    }
+  ],
+  "total_estimated_usd": 0.028992432000000002,
+  "total_budget_charge_usd": 0.0322476
+}

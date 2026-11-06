@@ -131,6 +131,8 @@ def main() -> None:
                         help="enable optional 1D axial force-admittance control after contact")
     parser.add_argument("--spiral-search", action="store_true",
                         help="expose a bounded force-controlled spiral socket-seating primitive")
+    parser.add_argument("--twist-after-seating", action="store_true",
+                        help="after stable seating, allow one bounded socket revolution; screw height remains fixed")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--execute-paid-rollouts", action="store_true", required=True)
     args = parser.parse_args()
@@ -138,6 +140,10 @@ def main() -> None:
         parser.error("--compliant-control requires --force-feedback")
     if args.spiral_search and not args.compliant_control:
         parser.error("--spiral-search requires --compliant-control")
+    if args.twist_after_seating and not args.spiral_search:
+        parser.error("--twist-after-seating requires --spiral-search")
+    if args.twist_after_seating and not args.force_feedback:
+        parser.error("--twist-after-seating requires --force-feedback")
     if not np.isfinite(args.action_amplification) or not 1.0 <= args.action_amplification <= 5.0:
         parser.error("--action-amplification must be between 1.0 and 5.0")
     settings = {**read_dotenv(ROOT / ".env"), **os.environ}
@@ -161,7 +167,8 @@ def main() -> None:
                                      compliant_control=args.compliant_control,
                                      spiral_search=args.spiral_search,
                                      mujoco_viewer=args.mujoco_viewer,
-                                     action_amplification=args.action_amplification)
+                                     action_amplification=args.action_amplification,
+                                     twist_after_seating=args.twist_after_seating)
     policy_options = dict(model=policy_model, base_url=policy_base, api_key_env=key_env,
                           env={key_env: settings[key_env]}, wire=wire,
                           max_llm_calls=args.max_calls, image_horizon=2,
@@ -174,9 +181,14 @@ def main() -> None:
     policy = agent_policy(**policy_options)
     policy._client._http.timeout = httpx.Timeout(args.request_timeout, connect=10.0)
     task_instruction = (
-        "Seat the socket securely onto the M6 external-hex screw head. At every observation, "
+        ("Seat the socket securely onto the M6 external-hex screw head, then turn the socket "
+         "counterclockwise one revolution while maintaining contact; the screw may rotate "
+         "in place but does not rise or extract. " if args.twist_after_seating else
+         "Seat the socket securely onto the M6 external-hex screw head. ")
+        + "At every observation, "
         "use wristview-derived vision_screw_xy_estimate_m and vision_xy_error_m only when "
-        "vision_confidence is at least 0.5. Align x/y while holding z; the controller "
+        "vision_confidence is at least 0.7. Below 0.7, hold x/y fixed and do not treat "
+        "a zero error as alignment. Align x/y while holding z; the controller "
         "blocks downward motion while confident estimated XY error exceeds 2 mm. "
         + ("In force-controlled spiral-search mode, reassess estimated x/y error at "
            "every observation: stop x/y corrections only while confident error is at "
@@ -194,13 +206,12 @@ def main() -> None:
            if args.compliant_control else "")
         + ("Once compensated tool-axis force reaches 1 N, contact takes priority over "
            "policy motion regardless of residual XY alignment. The controller latches "
-           "into bounded spiral search to resolve lateral and external-hex phase mismatch; "
-           "do not wait for the 2 mm visual threshold or issue XY/Z commands after contact. "
-           "Never command an upward/retracting move after "
-           "contact; do not continue issuing z-down targets either. Let the controller "
-           "maintain compliant contact and run the complete bounded spiral search inside "
-           "this same move_to action; no repeated LLM calls are needed during the search. "
-           "Each "
+           "contact and suspends Cartesian motion. Call the spiral_search tool exactly "
+           "once to start the bounded search; do not issue move_to after contact. The "
+           "spiral_search call blocks until stable seating, force protection, or the "
+           "configured step limit, without intermediate LLM calls. It resolves residual "
+           "lateral and external-hex phase mismatch. Never command an upward/retracting "
+           "move after contact. Each "
            "increment moves "
            "the tip a small amount in the plane while rotating the socket 60 degrees. "
            "Search stops on stable seating, its force guard, or the configured step limit. "
@@ -209,9 +220,13 @@ def main() -> None:
         "external-hex screw head, the screw head will normally be occluded by the socket "
         "in agentview; treat this as supporting evidence, not proof by itself. Do not claim "
         "contact until supported by visual or force evidence. Success is "
-        "stable physical socket engagement; do not rotate to extract the screw."
+        + ("completion of the one-revolution turn_socket operation after stable seating; "
+           "the screw remains at fixed height and is not extracted. "
+           if args.twist_after_seating else "stable physical socket engagement. ")
+        + "Do not use move_to to rotate the socket."
     )
-    task = Task(name="ur20_hex_socket_seating", scenes=[Scene(
+    task = Task(name=("ur20_hex_socket_turning" if args.twist_after_seating
+                      else "ur20_hex_socket_seating"), scenes=[Scene(
         f"ur20-screw-init{args.state_id:02d}", task_instruction)],
         scorer="success_at_end", max_steps=args.max_steps)
     original_stderr = sys.stderr
@@ -244,7 +259,8 @@ def main() -> None:
         summary = {"status": status, "runner_status": log.status,
                    "environment_success": embodiment.task_success,
                    "valid_socket_engagement_seen": embodiment.engaged_seen,
-                   "success_criterion": "stable_socket_engagement",
+                   "success_criterion": ("one_socket_revolution_after_stable_seating"
+                                         if args.twist_after_seating else "stable_socket_engagement"),
                    "required_stable_physics_steps": 20,
                    "max_screw_lift_m": embodiment.max_screw_lift,
                    "calls": transport.calls,
@@ -256,6 +272,10 @@ def main() -> None:
                    "force_feedback": args.force_feedback,
                    "compliant_control": args.compliant_control,
                    "spiral_search": args.spiral_search,
+                   "twist_after_seating": args.twist_after_seating,
+                   "socket_turn_completed": embodiment.socket_turn_completed,
+                   "socket_turn_stop_reason": embodiment.socket_turn_stop_reason,
+                   "socket_turn_screw_rotation_delta_rad": embodiment.socket_turn_screw_delta,
                    "action_amplification": args.action_amplification,
                    "video_frames": video_frame_count,
                    "video_fps": video_fps,

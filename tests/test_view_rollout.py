@@ -1,4 +1,9 @@
-from scripts.view_rollout import _dashboard_data, _rollout_entries, render_dashboard
+from scripts.view_rollout import (
+    _dashboard_data,
+    _rollout_entries,
+    _socket_opening_dashboard_data,
+    render_dashboard,
+)
 
 
 def test_dashboard_renders_multifield_rollout_filters():
@@ -25,6 +30,10 @@ def test_dashboard_renders_multifield_rollout_filters():
     assert "location.href=picker.value+(query?`?${query}`:'')" in html
     assert "point.t" in html
     assert "progress*maxStep" in html
+    assert "const floorCorners" in html
+    assert "const currentPoint=visible[visible.length-1]" in html
+    assert "currentPoint.z.toFixed(3)" in html
+    assert "stroke-dasharray':'4 4'" in html
     assert "matching" in html
 
 
@@ -54,3 +63,21 @@ def test_ur20_root_inspect_directory_loads_recorded_cartesian_actions(tmp_path):
         {"x": 0.1, "y": 0.2, "z": 0.3, "t": 0},
         {"x": 0.11, "y": 0.2, "z": 0.29, "t": 1},
     ]
+
+
+def test_socket_opening_viewer_uses_world_frame_ground_truth(tmp_path):
+    (tmp_path / "trajectory.jsonl").write_text(
+        '{"event":"start_pose","sim_time_s":0,"socket_opening_center_world_m":[0.8,1.0,0.153]}\n'
+        '{"event":"socket_opening_sample","sim_time_s":0.002,"socket_opening_center_world_m":[0.801,1.0,0.153]}\n',
+        encoding="utf-8",
+    )
+
+    data = _socket_opening_dashboard_data(tmp_path)
+    html = render_dashboard(data)
+
+    assert data["trajectory"] == [
+        {"x": 0.8, "y": 1.0, "z": 0.153, "t": 0.0},
+        {"x": 0.801, "y": 1.0, "z": 0.153, "t": 0.002},
+    ]
+    assert "Socket opening center" in html
+    assert "World-frame MuJoCo ground truth" in html
