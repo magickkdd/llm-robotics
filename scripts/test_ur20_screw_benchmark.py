@@ -30,13 +30,12 @@ def main() -> None:
         assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "wristview") >= 0
         assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "closeup") == -1
         wrist_camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "wristview")
-        assert 0.40 <= model.cam_pos[wrist_camera_id, 0] <= 0.41
-        assert -0.06 <= model.cam_pos[wrist_camera_id, 1] <= -0.05
+        assert 0.25 <= model.cam_pos[wrist_camera_id, 0] <= 0.27
         assert mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY,
                                  model.cam_bodyid[wrist_camera_id]) == "end_effector"
-        assert model.cam_mode[wrist_camera_id] == mujoco.mjtCamLight.mjCAMLIGHT_TARGETBODY
-        assert mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY,
-                                 model.cam_targetbodyid[wrist_camera_id]) == "screw_m6"
+        assert model.cam_mode[wrist_camera_id] == mujoco.mjtCamLight.mjCAMLIGHT_FIXED
+        camera_forward = -data.cam_xmat[wrist_camera_id].reshape(3, 3)[:, 2]
+        assert np.allclose(camera_forward, [0.0, 0.0, -1.0], atol=1e-5)
         battery_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "battery_collision")
         assert abs(model.geom_pos[battery_geom_id, 2] + model.geom_size[battery_geom_id, 2] - 0.148) < 1e-6
         battery_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "battery")

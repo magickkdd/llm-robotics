@@ -20,25 +20,8 @@ from ur20_timing import wait_for_simulated_time
 ROOT = Path(__file__).resolve().parents[1]
 SCENE = ROOT / "assets/ur20_screw_station/scene.xml"
 CONTROL_SUBSTEPS = 25
-SPIRAL_SEARCH_POINTS = 576
+SPIRAL_SEARCH_POINTS = 32
 SPIRAL_SEARCH_MAX_RADIUS_M = 0.008
-SPIRAL_SEARCH_TURNS = 16.0 / 3.0
-SPIRAL_SEARCH_SOCKET_SPEED_RAD_S = 3.0
-SPIRAL_SEARCH_SOCKET_STEP_RAD = np.pi / 3.0
-SPIRAL_SEARCH_POSITION_TOLERANCE_M = 0.00025
-SPIRAL_FORCE_BASELINE_SETTLE_MAX_STEPS = 2000
-SPIRAL_FORCE_BASELINE_SETTLE_TOLERANCE_N = 0.2
-SPIRAL_FORCE_BASELINE_SETTLE_STABLE_STEPS = 125
-FORCE_ADMITTANCE_GAIN_M_PER_N_S = 0.001
-FORCE_ADMITTANCE_MAX_OFFSET_M = 0.005
-SOCKET_TURN_SPEED_RAD_S = 0.6
-SOCKET_TURN_ANGLE_RAD = 2.0 * np.pi
-SOCKET_TURN_DIRECTION = -1.0
-SPIRAL_FORCE_DROP_THRESHOLD_N = 0.75
-SPIRAL_LATERAL_FORCE_RISE_THRESHOLD_N = 0.75
-SPIRAL_LATERAL_FORCE_CONFIRM_STEPS = 5
-SPIRAL_FORCE_DROP_EVENT_WINDOW_STEPS = 25
-SPIRAL_TACTILE_THRESHOLDS_CALIBRATED = False
 TOOL_TIP_REACH = 0.4979
 DOWNWARD_FLANGE_ROTATION = np.diag([1.0, -1.0, -1.0])
 ARM_TORQUE_LIMITS = np.array([738.0, 738.0, 433.0, 107.0, 107.0, 107.0])
@@ -54,104 +37,17 @@ INITIAL_OFFSETS = (
 INITIAL_ROTATIONS = tuple(np.deg2rad(5.0 * (index + 1)) for index in range(10))
 
 
-def osc_anchor_for_tip_target(tip_target: np.ndarray, tool_axis: np.ndarray,
-                              force_offset_m: float) -> np.ndarray:
-    tip_target = np.asarray(tip_target, dtype=float)
-    tool_axis = np.asarray(tool_axis, dtype=float)
-    if tip_target.shape != (3,) or tool_axis.shape != (3,):
-        raise ValueError("tip target and tool axis must be 3D vectors")
-    if not np.isfinite(tip_target).all() or not np.isfinite(tool_axis).all():
-        raise ValueError("tip target and tool axis must be finite")
-    return tip_target + tool_axis * float(force_offset_m)
-
-
-def socket_screw_coupling_parameters(start_screw_angle: float,
-                                     start_socket_angle: float,
-                                     axis_alignment: float) -> tuple[float, float]:
-    if not np.isfinite(axis_alignment) or abs(axis_alignment) < 0.99:
-        raise ValueError("socket and screw rotation axes must be parallel")
-    slope = 1.0 if axis_alignment > 0.0 else -1.0
-    return float(start_screw_angle - slope * start_socket_angle), slope
-
-
-class SpiralTactileDetector:
-    def __init__(self, reference_force_n: float,
-                 reference_lateral_force_xy: np.ndarray | tuple[float, float] = (0.0, 0.0),
-                 thresholds_calibrated: bool = SPIRAL_TACTILE_THRESHOLDS_CALIBRATED) -> None:
-        self.reference_force_n = float(reference_force_n)
-        self.reference_lateral_force_xy = np.asarray(reference_lateral_force_xy, dtype=float)
-        if (self.reference_lateral_force_xy.shape != (2,)
-                or not np.isfinite(self.reference_lateral_force_xy).all()):
-            raise ValueError("reference lateral force must be a finite XY vector")
-        self.current_force_n = self.reference_force_n
-        self.current_lateral_force_xy = self.reference_lateral_force_xy.copy()
-        self.axial_force_drop_n = 0.0
-        self.lateral_force_rise_n = 0.0
-        self.phase = "seeking_force_drop"
-        self.confirmation_steps = 0
-        self.force_drop_age_steps = None
-        self.force_drop_detected = False
-        self.axial_drop_condition_previous = False
-        self.thresholds_calibrated = bool(thresholds_calibrated)
-        self.candidate_detected = False
-        self.seated = False
-
-    def update(self, force_z_n: float,
-               lateral_force_xy: np.ndarray | tuple[float, float] = (0.0, 0.0)) -> bool:
-        force_z_n = float(force_z_n)
-        lateral_force_xy = np.asarray(lateral_force_xy, dtype=float)
-        if lateral_force_xy.shape != (2,) or not np.isfinite(lateral_force_xy).all():
-            raise ValueError("lateral force must be a finite XY vector")
-        self.current_force_n = force_z_n
-        self.current_lateral_force_xy = lateral_force_xy
-        self.axial_force_drop_n = abs(self.reference_force_n) - abs(force_z_n)
-        self.lateral_force_rise_n = float(
-            np.linalg.norm(lateral_force_xy)
-            - np.linalg.norm(self.reference_lateral_force_xy)
-        )
-        if self.seated:
-            return True
-        axial_drop_condition = (
-            abs(self.reference_force_n) - abs(force_z_n) >= SPIRAL_FORCE_DROP_THRESHOLD_N
-        )
-        if axial_drop_condition and not self.axial_drop_condition_previous:
-            self.force_drop_detected = True
-            self.force_drop_age_steps = 0
-            self.phase = "seeking_lateral_force"
-        elif self.force_drop_detected:
-            self.force_drop_age_steps += 1
-            if self.force_drop_age_steps > SPIRAL_FORCE_DROP_EVENT_WINDOW_STEPS:
-                self.force_drop_detected = False
-                self.force_drop_age_steps = None
-                self.confirmation_steps = 0
-                self.phase = "seeking_force_drop"
-        self.axial_drop_condition_previous = axial_drop_condition
-        lateral_force_rise = (
-            self.lateral_force_rise_n >= SPIRAL_LATERAL_FORCE_RISE_THRESHOLD_N
-        )
-        if axial_drop_condition and self.force_drop_detected and lateral_force_rise:
-            self.confirmation_steps += 1
-            if self.confirmation_steps >= SPIRAL_LATERAL_FORCE_CONFIRM_STEPS:
-                self.candidate_detected = True
-                if self.thresholds_calibrated:
-                    self.phase = "seated"
-                    self.seated = True
-        else:
-            self.confirmation_steps = 0
-        return self.seated
-
-
 class Worker:
-    def __init__(self, render: bool = True) -> None:
+    def __init__(self) -> None:
         self.model = mujoco.MjModel.from_xml_path(str(SCENE))
         self.model.site_rgba[:, 3] = 0.0
         self.data = mujoco.MjData(self.model)
-        self.renderer = mujoco.Renderer(self.model, height=256, width=256) if render else None
+        self.renderer = mujoco.Renderer(self.model, height=256, width=256)
         self.viewer = None
         self.viewer_last_sync = None
         self.camera_ids = {
             name: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, name)
-            for name in ("agentview", "wristview", "screw_front", "screw_side", "screw_back")
+            for name in ("agentview", "wristview")
         }
         self.site_ids = {
             name: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, name)
@@ -168,7 +64,6 @@ class Worker:
         self.ft_peak_external = np.zeros(6, dtype=float)
         self.force_control_active = False
         self.force_control_target_n = 0.0
-        self.force_control_direction = 1.0
         self.force_control_offset_m = 0.0
         self.spiral_phase_offset = 0.0
         self.spiral_search_state = np.zeros(3, dtype=float)
@@ -176,30 +71,15 @@ class Worker:
         self.spiral_search_guarded = False
         self.spiral_search_index = 0
         self.spiral_search_center = None
-        self.spiral_search_start_axial = None
         self.spiral_search_rotation = None
         self.spiral_reference_force_n = None
-        self.spiral_force_baseline_settled = False
-        self.spiral_force_baseline_settle_steps = 0
-        self.spiral_force_baseline_guard_reason = None
-        self.spiral_tactile_detector = None
-        self.spiral_force_trace = []
-        self.debug_tactile_diagnostics = False
-        self.record_socket_opening_trajectory = False
-        self.socket_opening_trajectory = []
+        self.spiral_reference_z_m = None
         self.socket_engagement_ticks = 0
-        self.socket_turn_active = False
-        self.socket_turn_start_angle = 0.0
-        self.socket_turn_start_screw_angle = 0.0
-        self.socket_turn_completed = False
         self.osc_target_position = None
         self.osc_target_rotation = None
         self.screw_lift_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "screw_lift")
         self.screw_rotation_lock_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "screw_rotation_lock"
-        )
-        self.socket_screw_coupling_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "socket_screw_rotation_coupling"
         )
         self.screw_height_lock_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "screw_height_lock"
@@ -209,23 +89,11 @@ class Worker:
         self.screw_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "screw_m6")
         self.screw_spin_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "screw_spin")
         self.screw_spin_qpos = self.model.jnt_qposadr[self.screw_spin_id]
-        self.socket_joint_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_JOINT, "socket_joint"
-        )
-        self.socket_joint_qpos = self.model.jnt_qposadr[self.socket_joint_id]
-        socket_actuator_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "socket_velocity"
-        )
-        self.socket_actuator_id = socket_actuator_id
         self.screw_lift_qpos = self.model.jnt_qposadr[self.screw_lift_id]
         self.socket_wall_ids = {
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"socket_wall_{index}")
             for index in range(6)
         }
-        self.socket_wall_ids.update(
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"socket_lip_{index}")
-            for index in range(6)
-        )
         force_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "tool_ft_force")
         torque_sensor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, "tool_ft_torque")
         self.ft_sensor_adr = int(self.model.sensor_adr[force_sensor_id])
@@ -242,48 +110,17 @@ class Worker:
         contact = self._socket_contact()
         axis = self.data.site_xmat[self.tool_tip_id].reshape(3, 3)[:, 0]
         alignment = float(np.dot(axis, np.array([0.0, 0.0, -1.0])))
-        screw_head_center = self.data.geom_xpos[self.screw_head_geom_id].copy()
-        head_vertices = np.asarray(self.model.mesh_vert[
-            self.model.mesh_vertadr[self.model.geom_dataid[self.screw_head_geom_id]]:
-            self.model.mesh_vertadr[self.model.geom_dataid[self.screw_head_geom_id]]
-            + self.model.mesh_vertnum[self.model.geom_dataid[self.screw_head_geom_id]]
-        ])
-        head_rotation = self.data.geom_xmat[self.screw_head_geom_id].reshape(3, 3)
-        screw_head_top = screw_head_center.copy()
-        screw_head_top[2] += float(np.max((head_vertices @ head_rotation.T)[:, 2]))
-        delta = screw_head_top - self.data.site_xpos[self.tool_tip_id]
+        delta = self.data.geom_xpos[self.screw_head_geom_id] - self.data.site_xpos[self.tool_tip_id]
         axial = float(np.dot(delta, axis))
         radial = float(np.linalg.norm(delta - axial * axis))
-        engaged = contact and alignment >= 0.985 and radial <= 0.003 and -0.014 <= axial <= -0.002
+        engaged = contact and alignment >= 0.985 and radial <= 0.003 and -0.012 <= axial <= 0.003
         return engaged, contact, axial, radial, alignment
-
-    def _confirmed_socket_seating(self) -> bool:
-        detector = self.spiral_tactile_detector
-        return bool(detector is not None and detector.candidate_detected)
 
     def _wrench(self) -> np.ndarray:
         return np.concatenate((
             self.data.sensordata[self.ft_sensor_adr:self.ft_sensor_adr + 3],
             self.data.sensordata[self.torque_sensor_adr:self.torque_sensor_adr + 3],
         )).copy()
-
-    def _spiral_tactile_state(self) -> list[float]:
-        detector = self.spiral_tactile_detector
-        if detector is None:
-            return [0.0] * 7
-        candidate = detector.candidate_detected
-        confirmed = detector.seated
-        phase = {
-            "seeking_force_drop": 0.0,
-            "seeking_lateral_force": 1.0,
-            "seated": 2.0,
-        }[detector.phase] if not candidate or confirmed else 3.0
-        return [phase, float(confirmed),
-                detector.axial_force_drop_n,
-                detector.lateral_force_rise_n,
-                float(detector.confirmation_steps),
-                float(detector.force_drop_detected),
-                float(detector.force_drop_age_steps or 0)]
 
     def _initialize_force_reference(self) -> None:
         if self.ft_reference_model is not None:
@@ -384,6 +221,9 @@ class Worker:
                 "could not open MuJoCo viewer; verify WSLg/X11 desktop access "
                 f"(DISPLAY={os.environ.get('DISPLAY')!r}): {exc}"
             ) from exc
+        with self.viewer.lock():
+            self.viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+            self.viewer.cam.fixedcamid = self.camera_ids["agentview"]
         self.viewer.sync()
         self.viewer_last_sync = time.perf_counter()
 
@@ -393,11 +233,6 @@ class Worker:
         return nullcontext()
 
     def _sync_viewer_realtime(self, started: float, simulated_seconds: float) -> None:
-        if self.spiral_search_active:
-            if self.viewer is not None and self.viewer.is_running():
-                self.viewer.sync()
-                self.viewer_last_sync = time.perf_counter()
-            return
         wait_for_simulated_time(started, simulated_seconds)
         if self.viewer is not None and self.viewer.is_running():
             self.viewer.sync()
@@ -457,27 +292,6 @@ class Worker:
                 "socket_radial_error": socket_radial,
                 "tool_axis_alignment": axis_alignment,
                 "engaged_seen": self.engaged_seen,
-                "spiral_tactile_seated": bool(
-                    self.spiral_tactile_detector and self.spiral_tactile_detector.seated
-                    and SPIRAL_TACTILE_THRESHOLDS_CALIBRATED
-                ),
-                "spiral_tactile_phase": (
-                    ("candidate_uncalibrated"
-                     if self.spiral_tactile_detector
-                     and self.spiral_tactile_detector.candidate_detected
-                     and not self.spiral_tactile_detector.seated
-                     else self.spiral_tactile_detector.phase)
-                    if self.spiral_tactile_detector else "idle"
-                ),
-                "spiral_tactile_state": self._spiral_tactile_state(),
-                "spiral_force_baseline_settled": self.spiral_force_baseline_settled,
-                "spiral_force_trace": list(self.spiral_force_trace),
-                "socket_turn_state": [
-                    float(self.socket_turn_active),
-                    float(self.data.qpos[self.socket_joint_qpos] - self.socket_turn_start_angle)
-                    if self.socket_turn_active or self.socket_turn_completed else 0.0,
-                    float(self.socket_turn_completed),
-                ],
             }
             if include_force:
                 raw, external = self._contact_wrench()
@@ -492,6 +306,10 @@ class Worker:
                     float(external[2] - self.spiral_reference_force_n)
                     if self.spiral_reference_force_n is not None else 0.0
                 )
+                result["spiral_tip_z_displacement_m"] = (
+                    float(tool_tip[2] - self.spiral_reference_z_m)
+                    if self.spiral_reference_z_m is not None else 0.0
+                )
             return result
 
     def reset(self, state_id: int = 0, include_force: bool = False,
@@ -500,12 +318,8 @@ class Worker:
             mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
             self._place_start(int(state_id))
             mujoco.mj_forward(self.model, self.data)
+            self.osc_target_position = self.data.site_xpos[self.tool_tip_id].copy()
             self.osc_target_rotation = self.data.site_xmat[self.tool_tip_id].reshape(3, 3).copy()
-            self.osc_target_position = osc_anchor_for_tip_target(
-                self.data.site_xpos[self.tool_tip_id],
-                self.osc_target_rotation[:, 0],
-                self.force_control_offset_m,
-            )
         self.steps = 0
         self.engaged_seen = False
         self.ft_peak_external = np.zeros(6, dtype=float)
@@ -514,21 +328,12 @@ class Worker:
         self.force_control_offset_m = 0.0
         self.spiral_phase_offset = 0.0
         self.spiral_search_state = np.zeros(3, dtype=float)
-        self.socket_turn_active = False
-        self.socket_turn_start_angle = float(self.data.qpos[self.socket_joint_qpos])
-        self.socket_turn_start_screw_angle = float(self.data.qpos[self.screw_spin_qpos])
-        self.socket_turn_completed = False
         self.spiral_search_active = False
         self.spiral_search_guarded = False
         self.spiral_search_center = None
-        self.spiral_search_start_axial = None
         self.spiral_search_rotation = None
         self.spiral_reference_force_n = None
-        self.spiral_force_baseline_settled = False
-        self.spiral_force_baseline_settle_steps = 0
-        self.spiral_force_baseline_guard_reason = None
-        self.spiral_tactile_detector = None
-        self.spiral_force_trace = []
+        self.spiral_reference_z_m = None
         self.socket_engagement_ticks = 0
         if open_viewer:
             self._start_viewer()
@@ -551,13 +356,8 @@ class Worker:
                           rotation_jacobian, self.tool_tip_id)
         jacobian = np.vstack((position_jacobian[:, :6], rotation_jacobian[:, :6]))
         twist = jacobian @ self.data.qvel[:6]
-        position_kp = OSC_KP[:3].copy()
-        position_kd = OSC_KD[:3].copy()
-        if self.spiral_search_active:
-            position_kp[:2] *= 16.0
-            position_kd[:2] *= 4.0
         desired_acceleration = np.concatenate((
-            position_kp * position_error - position_kd * twist[:3],
+            OSC_KP[:3] * position_error - OSC_KD[:3] * twist[:3],
             OSC_KP[3:] * rotation_error - OSC_KD[3:] * twist[3:],
         ))
         mass = np.zeros((self.model.nv, self.model.nv))
@@ -571,163 +371,71 @@ class Worker:
         torque += self.data.qfrc_bias[:6] - self.data.qfrc_passive[:6]
         return np.clip(torque, -ARM_TORQUE_LIMITS, ARM_TORQUE_LIMITS)
 
-    def _begin_spiral_search(self, target_force_n: float) -> dict:
-        with self._viewer_lock():
-            self.force_control_target_n = float(np.clip(target_force_n, 0.0, 5.0))
-            tip_position = self.data.site_xpos[self.tool_tip_id].copy()
-            tip_rotation_now = self.data.site_xmat[self.tool_tip_id].reshape(3, 3).copy()
-        tool_axis = tip_rotation_now[:, 0]
-        self.osc_target_position = tip_position.copy()
-        self.osc_target_rotation = tip_rotation_now
-        initial_raw, initial_wrench = self._contact_wrench()
-        if abs(float(initial_wrench[2])) > 0.1:
-            self.force_control_direction = float(np.sign(initial_wrench[2]))
-        self.spiral_force_baseline_settle_steps = 0
-        self.spiral_force_baseline_settled = abs(float(initial_wrench[2])) >= 0.2
-        if np.linalg.norm(initial_wrench[:3]) >= 50.0:
-            self.spiral_search_guarded = True
-            self.spiral_force_baseline_guard_reason = "force_limit"
-            self.spiral_search_state = np.array([0.0, 0.0, 1.0])
-            return self.observe(include_force=True)
-        result = self.observe(include_force=True)
-        with self._viewer_lock():
-            tip_position = self.data.site_xpos[self.tool_tip_id].copy()
-            tip_rotation_now = self.data.site_xmat[self.tool_tip_id].reshape(3, 3).copy()
-        self.spiral_search_center = tip_position.copy()
-        self.spiral_search_rotation = tip_rotation_now
-        self.spiral_search_start_axial = float(
-            np.dot(
-                self.data.geom_xpos[self.screw_head_geom_id]
-                - self.data.site_xpos[self.tool_tip_id],
-                tip_rotation_now[:, 0],
-            )
-        )
-        self.spiral_reference_force_n = float(initial_wrench[2])
-        self.spiral_tactile_detector = SpiralTactileDetector(
-            self.spiral_reference_force_n,
-            initial_wrench[:2],
-            SPIRAL_TACTILE_THRESHOLDS_CALIBRATED,
-        )
-        self.spiral_search_index = 0
-        self.spiral_search_active = True
-        if self.debug_tactile_diagnostics:
-            result["spiral_baseline_diagnostic"] = {
-                "initial_axial_force_n": float(initial_wrench[2]),
-                "settled_axial_force_n": float(initial_wrench[2]),
-                "target_force_n": float(target_force_n),
-                "settle_steps": 0,
-                "settle_force_trace_n": [],
-                "baseline_settled": self.spiral_force_baseline_settled,
-                "force_offset_m": float(self.force_control_offset_m),
-                "raw_initial_wrench": initial_raw.tolist(),
-            }
-        return result
-
     def _spiral_search(self, count: int, include_force: bool,
                        target_force_n: float) -> dict:
         if not include_force or target_force_n <= 0:
             raise ValueError("spiral search requires force feedback and a positive axial force setpoint")
+        with self._viewer_lock():
+            self.force_control_target_n = float(np.clip(target_force_n, 0.0, 5.0))
+            current_engagement = self._valid_socket_engagement()[0]
+            tip_position = self.data.site_xpos[self.tool_tip_id].copy()
+            tip_rotation_now = self.data.site_xmat[self.tool_tip_id].reshape(3, 3).copy()
+        if current_engagement:
+            if not self.spiral_search_active:
+                self.spiral_search_index = 0
+                self.spiral_search_center = tip_position.copy()
+                self.spiral_search_rotation = tip_rotation_now.copy()
+                _, reference_wrench = self._contact_wrench()
+                self.spiral_reference_force_n = float(reference_wrench[2])
+                self.spiral_reference_z_m = float(tip_position[2])
+            self.osc_target_position = tip_position
+            self.osc_target_rotation = tip_rotation_now
+            result = self._run_control_steps(count, include_force=True,
+                                             target_force_n=target_force_n,
+                                             socket_velocity=0.0)
+            engaged = bool(result["socket_engaged"])
+            stable = bool(result["socket_engagement_stable"])
+            peak = np.asarray(result["force_torque_peak_compensated"][:3], dtype=float)
+            self.spiral_search_guarded = not engaged and np.linalg.norm(peak) >= 50.0
+            self.spiral_search_active = not stable and not self.spiral_search_guarded
+            self.spiral_search_state = np.array([
+                float(self.spiral_search_active), float(self.spiral_search_index),
+                float(self.spiral_search_guarded),
+            ])
+            return result
+
         if not self.spiral_search_active:
-            settle_result = self._begin_spiral_search(target_force_n)
-            if self.spiral_search_guarded:
-                return settle_result
-        self.spiral_force_trace = []
+            self.spiral_search_active = True
+            self.spiral_search_index = 0
+            self.spiral_search_center = tip_position
+            self.spiral_search_rotation = tip_rotation_now
+            _, reference_wrench = self._contact_wrench()
+            self.spiral_reference_force_n = float(reference_wrench[2])
+            self.spiral_reference_z_m = float(tip_position[2])
         index = self.spiral_search_index
         tip_position = self.spiral_search_center
         tip_rotation = self.spiral_search_rotation
         sensor_rotation = self.data.site_xmat[self.ft_sensor_site_id].reshape(3, 3).copy()
         radius = SPIRAL_SEARCH_MAX_RADIUS_M * (index + 1) / SPIRAL_SEARCH_POINTS
-        angle = (self.spiral_phase_offset + index * 2.0 * np.pi
-                 * SPIRAL_SEARCH_TURNS / SPIRAL_SEARCH_POINTS)
-        desired_tip_position = tip_position + radius * (
+        angle = self.spiral_phase_offset + index * np.pi / 3.0
+        target_position = tip_position + radius * (
             np.cos(angle) * sensor_rotation[:, 0]
             + np.sin(angle) * sensor_rotation[:, 1]
         )
-        tool_axis = tip_rotation[:, 0]
-        self.osc_target_position = desired_tip_position.copy()
+        self.osc_target_position = target_position
         self.osc_target_rotation = tip_rotation
-        rotation_start = float(self.data.qpos[self.socket_joint_qpos])
-        rotation_target = SPIRAL_SEARCH_SOCKET_STEP_RAD
-        rotation_speed = SOCKET_TURN_DIRECTION * SPIRAL_SEARCH_SOCKET_SPEED_RAD_S
-        rotation_steps = 0
-        max_rotation_steps = max(1, int(np.ceil(
-            rotation_target / (SPIRAL_SEARCH_SOCKET_SPEED_RAD_S * self.model.opt.timestep)
-        )))
-        max_point_steps = max_rotation_steps * 20
-        result = None
-        while rotation_steps < max_point_steps:
-            angle_progress = SOCKET_TURN_DIRECTION * (
-                float(self.data.qpos[self.socket_joint_qpos]) - rotation_start
-            )
-            actual_tip_position = self.data.site_xpos[self.tool_tip_id].copy()
-            point_reached = np.linalg.norm(
-                actual_tip_position - desired_tip_position
-            ) <= SPIRAL_SEARCH_POSITION_TOLERANCE_M
-            socket_stepped = angle_progress >= rotation_target - (
-                SPIRAL_SEARCH_SOCKET_SPEED_RAD_S * self.model.opt.timestep
-            )
-            if socket_stepped:
-                break
-            result = self._run_control_steps(
-                min(count, max_point_steps - rotation_steps,
-                    max(1, max_rotation_steps - int(angle_progress / (
-                        SPIRAL_SEARCH_SOCKET_SPEED_RAD_S * self.model.opt.timestep
-                    ))) if not socket_stepped else count),
-                include_force=True, target_force_n=target_force_n,
-                socket_velocity=rotation_speed if not socket_stepped else 0.0,
-            )
-            rotation_steps += min(count, max_point_steps - rotation_steps)
-            peak = np.asarray(result["force_torque_peak_compensated"][:3], dtype=float)
-            tactile_candidate = bool(
-                self.spiral_tactile_detector
-                and self.spiral_tactile_detector.candidate_detected
-            )
-            if np.linalg.norm(peak) >= 50.0 or tactile_candidate:
-                break
-        if result is None:
-            result = self.observe(include_force=True)
-        else:
-            actual_tip_position = self.data.site_xpos[self.tool_tip_id].copy()
-            point_reached = np.linalg.norm(
-                actual_tip_position - desired_tip_position
-            ) <= SPIRAL_SEARCH_POSITION_TOLERANCE_M
-            socket_stepped = (
-                SOCKET_TURN_DIRECTION
-                * (float(self.data.qpos[self.socket_joint_qpos]) - rotation_start)
-                >= rotation_target - SPIRAL_SEARCH_SOCKET_SPEED_RAD_S * self.model.opt.timestep
-            )
-            if not socket_stepped:
-                if np.linalg.norm(np.asarray(result["force_torque_peak_compensated"][:3])) < 50.0:
-                    self.spiral_search_guarded = True
-                    self.spiral_force_baseline_guard_reason = "socket_step_incomplete"
-            result["spiral_target_tracking_error_m"] = float(
-                np.linalg.norm(actual_tip_position - desired_tip_position)
-            )
-        self.data.ctrl[6] = 0.0
+        search_duration = max(1, int(count)) * self.model.opt.timestep
+        socket_speed = -(np.pi / 3.0) / search_duration
+        result = self._run_control_steps(count, include_force=True,
+                                         target_force_n=target_force_n,
+                                         socket_velocity=socket_speed)
         peak = np.asarray(result["force_torque_peak_compensated"][:3], dtype=float)
+        engaged = bool(result["socket_engaged"])
         force_guarded = np.linalg.norm(peak) >= 50.0
-        tactile_candidate = bool(
-            self.spiral_tactile_detector
-            and self.spiral_tactile_detector.candidate_detected
-        )
-        if force_guarded and self.spiral_tactile_detector is not None:
-            self.spiral_tactile_detector.seated = False
-            self.spiral_tactile_detector.candidate_detected = False
-            self.spiral_tactile_detector.phase = "seeking_force_drop"
-            self.spiral_tactile_detector.confirmation_steps = 0
-            self.spiral_tactile_detector.force_drop_detected = False
-            self.spiral_tactile_detector.force_drop_age_steps = None
-            self.spiral_tactile_detector.axial_force_drop_n = 0.0
-            self.spiral_tactile_detector.lateral_force_rise_n = 0.0
-            tactile_candidate = False
-        seating_confirmed = tactile_candidate
-        step_failed = self.spiral_force_baseline_guard_reason in {
-            "spiral_point_unreached", "socket_step_incomplete"
-        }
-        if seating_confirmed or force_guarded or step_failed:
+        if engaged or force_guarded:
             self.data.ctrl[6] = 0.0
             self.spiral_search_active = False
-            self.spiral_search_guarded = (force_guarded and not seating_confirmed) or step_failed
+            self.spiral_search_guarded = force_guarded and not engaged
         else:
             self.spiral_search_index += 1
             if self.spiral_search_index >= SPIRAL_SEARCH_POINTS:
@@ -740,75 +448,7 @@ class Worker:
             float(self.spiral_search_active), float(index + 1),
             float(self.spiral_search_guarded),
         ])
-        result.update(self.observe(include_force))
-        if self.debug_tactile_diagnostics:
-            result["spiral_force_trace"] = self.spiral_force_trace
-        return result
-
-    def socket_turn_step(self, count: int = CONTROL_SUBSTEPS,
-                         target_force_n: float = 2.0) -> dict:
-        if not self.socket_turn_active:
-            engaged, _, _, _, _ = self._valid_socket_engagement()
-            if not (self.spiral_tactile_detector and self.spiral_tactile_detector.seated
-                    and SPIRAL_TACTILE_THRESHOLDS_CALIBRATED):
-                raise ValueError("socket turning requires confirmed tactile seating")
-            self.socket_turn_active = True
-            self.socket_turn_completed = False
-            self.socket_turn_start_angle = float(self.data.qpos[self.socket_joint_qpos])
-            self.socket_turn_start_screw_angle = float(self.data.qpos[self.screw_spin_qpos])
-            self.data.eq_active[self.screw_rotation_lock_id] = 0
-            axis_alignment = float(
-                np.dot(
-                    self.data.xaxis[self.screw_spin_id],
-                    self.data.xaxis[self.socket_joint_id],
-                )
-            )
-            self.model.eq_data[self.socket_screw_coupling_id, :2] = (
-                socket_screw_coupling_parameters(
-                    self.socket_turn_start_screw_angle,
-                    self.socket_turn_start_angle,
-                    axis_alignment,
-                )
-            )
-            self.data.eq_active[self.socket_screw_coupling_id] = 1
-            self.osc_target_position = self.data.site_xpos[self.tool_tip_id].copy()
-            self.osc_target_rotation = self.data.site_xmat[self.tool_tip_id].reshape(3, 3).copy()
-
-        result = self._run_control_steps(
-            count, include_force=True, target_force_n=target_force_n,
-            socket_velocity=SOCKET_TURN_DIRECTION * SOCKET_TURN_SPEED_RAD_S,
-        )
-        elapsed_angle = float(self.data.qpos[self.socket_joint_qpos] - self.socket_turn_start_angle)
-        force_peak = np.linalg.norm(np.asarray(result["force_torque_peak_compensated"][:3]))
-        still_engaged = bool(result["socket_engaged"])
-        if force_peak >= 50.0 or not still_engaged:
-            self._finish_socket_turn()
-            result["socket_turn_stop_reason"] = (
-                "force_guard" if force_peak >= 50.0 else "socket_engagement_lost"
-            )
-        elif abs(elapsed_angle) >= SOCKET_TURN_ANGLE_RAD:
-            self._finish_socket_turn(completed=True)
-            result["socket_turn_stop_reason"] = "one_revolution_completed"
-        else:
-            result["socket_turn_stop_reason"] = None
-        result["socket_turn_state"] = [
-            float(self.socket_turn_active),
-            float(self.data.qpos[self.socket_joint_qpos] - self.socket_turn_start_angle),
-            float(self.socket_turn_completed),
-        ]
-        result["screw_rotation_delta"] = float(
-            self.data.qpos[self.screw_spin_qpos] - self.socket_turn_start_screw_angle
-        )
-        return result
-
-    def _finish_socket_turn(self, completed: bool = False) -> None:
-        with self._viewer_lock():
-            self.data.ctrl[6] = 0.0
-            self.data.eq_active[self.socket_screw_coupling_id] = 0
-            self.model.eq_data[self.screw_rotation_lock_id, 0] = self.data.qpos[self.screw_spin_qpos]
-            self.data.eq_active[self.screw_rotation_lock_id] = 1
-            self.socket_turn_active = False
-            self.socket_turn_completed = completed
+        return self.observe(include_force)
 
     def _run_control_steps(self, count: int, include_force: bool,
                            target_force_n: float, socket_velocity: float) -> dict:
@@ -824,17 +464,10 @@ class Worker:
                     mujoco.mj_forward(self.model, self.data)
                     _, external = self._contact_wrench()
                     self.force_control_active = True
-                    measured_force_n = external[2]
-                    force_error = self.force_control_direction * (
-                        self.force_control_target_n
-                        - self.force_control_direction * measured_force_n
-                    )
+                    force_error = self.force_control_target_n - external[2]
                     self.force_control_offset_m = float(np.clip(
-                        self.force_control_offset_m
-                        + FORCE_ADMITTANCE_GAIN_M_PER_N_S * force_error
-                        * self.model.opt.timestep,
-                        -FORCE_ADMITTANCE_MAX_OFFSET_M,
-                        FORCE_ADMITTANCE_MAX_OFFSET_M,
+                        self.force_control_offset_m + 0.0005 * force_error * self.model.opt.timestep,
+                        -0.010, 0.010,
                     ))
                 tool_axis = self.data.site_xmat[self.tool_tip_id].reshape(3, 3)[:, 0]
                 target_position = self.osc_target_position + tool_axis * self.force_control_offset_m
@@ -842,111 +475,11 @@ class Worker:
                 self.data.ctrl[6] = float(np.clip(socket_velocity, -60.0, 60.0))
                 mujoco.mj_step(self.model, self.data)
                 self.steps += 1
-                if self.record_socket_opening_trajectory:
-                    opening_center = self.data.site_xpos[self.tool_tip_id].copy()
-                    self.socket_opening_trajectory.append({
-                        "sim_time_s": float(self.data.time),
-                        "world_m": opening_center.tolist(),
-                    })
                 if include_force:
                     mujoco.mj_forward(self.model, self.data)
                     _, external = self._contact_wrench()
                     peak_external = np.where(np.abs(external) > np.abs(peak_external),
                                              external, peak_external)
-                    force_guard_triggered = np.linalg.norm(external[:3]) >= 50.0
-                    engaged_diagnostic = self._valid_socket_engagement()[0]
-                    engagement_ticks_diagnostic = (
-                        self.socket_engagement_ticks + 1 if engaged_diagnostic else 0
-                    )
-                    if self.spiral_search_active and self.spiral_tactile_detector is not None:
-                        self.spiral_tactile_detector.update(
-                            external[2], external[:2]
-                        )
-                        socket_screw_normal_force_n = 0.0
-                        socket_screw_contact_count = 0
-                        if self.debug_tactile_diagnostics:
-                            for contact_index, contact in enumerate(
-                                self.data.contact[:self.data.ncon]
-                            ):
-                                is_socket_screw_contact = (
-                                    contact.geom1 == self.screw_head_geom_id
-                                    and contact.geom2 in self.socket_wall_ids
-                                ) or (
-                                    contact.geom2 == self.screw_head_geom_id
-                                    and contact.geom1 in self.socket_wall_ids
-                                )
-                                if is_socket_screw_contact:
-                                    contact_force = np.zeros(6, dtype=float)
-                                    mujoco.mj_contactForce(
-                                        self.model, self.data, contact_index, contact_force
-                                    )
-                                    socket_screw_normal_force_n += max(
-                                        0.0, float(contact_force[0])
-                                    )
-                                    socket_screw_contact_count += 1
-                        trace_sample = {
-                            "time": float(self.data.time),
-                            "axial_force_n": float(external[2]),
-                            "axial_drop_from_baseline_n": float(
-                                self.spiral_tactile_detector.axial_force_drop_n
-                            ),
-                            "lateral_force_xy_n": external[:2].tolist(),
-                            "lateral_force_magnitude_n": float(np.linalg.norm(external[:2])),
-                            "lateral_rise_from_baseline_n": float(
-                                self.spiral_tactile_detector.lateral_force_rise_n
-                            ),
-                            "force_drop_detected": bool(
-                                self.spiral_tactile_detector.force_drop_detected
-                            ),
-                            "lateral_confirmation_steps": int(
-                                self.spiral_tactile_detector.confirmation_steps
-                            ),
-                            "axial_drop_event_age_steps": (
-                                self.spiral_tactile_detector.force_drop_age_steps
-                            ),
-                            "socket_engaged_diagnostic": bool(engaged_diagnostic),
-                            "socket_engagement_ticks_diagnostic": int(
-                                engagement_ticks_diagnostic
-                            ),
-                            "socket_seated_diagnostic": engagement_ticks_diagnostic >= 20,
-                            "socket_screw_normal_contact_force_n_private": (
-                                socket_screw_normal_force_n
-                            ),
-                            "socket_screw_contact_count_private": socket_screw_contact_count,
-                        }
-                        if self.debug_tactile_diagnostics and (
-                            self.spiral_tactile_detector.force_drop_detected
-                            and self.spiral_tactile_detector.axial_force_drop_n
-                            >= SPIRAL_FORCE_DROP_THRESHOLD_N
-                            and self.spiral_tactile_detector.lateral_force_rise_n
-                            >= SPIRAL_LATERAL_FORCE_RISE_THRESHOLD_N
-                        ):
-                            trace_sample["contact_pairs"] = [
-                                {
-                                    "geom1": mujoco.mj_id2name(
-                                        self.model, mujoco.mjtObj.mjOBJ_GEOM, contact.geom1
-                                    ),
-                                    "geom2": mujoco.mj_id2name(
-                                        self.model, mujoco.mjtObj.mjOBJ_GEOM, contact.geom2
-                                    ),
-                                    "distance_m": float(contact.dist),
-                                }
-                                for contact in self.data.contact[:self.data.ncon]
-                            ]
-                        if self.debug_tactile_diagnostics:
-                            trace_sample["moment_xyz_nm_private"] = external[3:].tolist()
-                            trace_sample["socket_motor_torque_nm_private"] = float(
-                                self.data.actuator_force[self.socket_actuator_id]
-                            )
-                            trace_sample["tool_tip_xy_private_m"] = (
-                                self.data.site_xpos[self.tool_tip_id, :2].tolist()
-                            )
-                            trace_sample["socket_angle_private_rad"] = float(
-                                self.data.qpos[self.socket_joint_qpos]
-                            )
-                        self.spiral_force_trace.append(trace_sample)
-                    if force_guard_triggered:
-                        break
                 engaged, _, _, _, _ = self._valid_socket_engagement()
                 self.engaged_seen = self.engaged_seen or engaged
                 self.socket_engagement_ticks = self.socket_engagement_ticks + 1 if engaged else 0
@@ -968,7 +501,6 @@ class Worker:
         if spiral_search:
             return self._spiral_search(count, include_force, target_force_n)
         self.osc_target_position = target.copy()
-        self.force_control_offset_m = 0.0
         self.spiral_search_state = np.array([
             0.0, 0.0, float(self.spiral_search_guarded),
         ])
@@ -997,12 +529,6 @@ def main() -> None:
                                      request.get("include_force", False),
                                      request.get("target_force_n", 0.0),
                                      request.get("spiral_search", False))
-            elif operation == "socket_turn_step":
-                result = worker.socket_turn_step(request.get("count", CONTROL_SUBSTEPS),
-                                                 request.get("target_force_n", 2.0))
-            elif operation == "socket_turn_stop":
-                worker._finish_socket_turn()
-                result = worker.observe(include_force=True)
             elif operation == "close":
                 break
             else:

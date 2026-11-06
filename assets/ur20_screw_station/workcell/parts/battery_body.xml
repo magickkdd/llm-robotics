@@ -9,13 +9,7 @@
         contype="0" conaffinity="0" group="2"/>
 
   <!-- 主板顶面约 z=0.148 m；后侧凸边另由视觉网格呈现，不应把整个顶面抬高到 0.273 m。 -->
-  <geom name="battery_collision_left" type="box" size="0.4725 0.485 0.074" pos="-0.1875 0 0.074"
-        group="3" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
-  <geom name="battery_collision_right" type="box" size="0.1725 0.485 0.074" pos="0.4875 0 0.074"
-        group="3" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
-  <geom name="battery_collision_front" type="box" size="0.015 0.235 0.074" pos="0.3 -0.25 0.074"
-        group="3" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
-  <geom name="battery_collision_back" type="box" size="0.015 0.235 0.074" pos="0.3 0.25 0.074"
+  <geom name="battery_collision" type="box" size="0.66 0.485 0.074" pos="0 0 0.074"
         group="3" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
 
   <site name="battery_top" pos="0 0 0.273" size="0.02 0.02 0.02" rgba="0.2 0.9 0.2 0.6"/>

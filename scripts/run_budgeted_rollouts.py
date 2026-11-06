@@ -85,16 +85,6 @@ def main() -> None:
                         help="storyboards from scripts/prepare_demonstrations.py (few-shot)")
     parser.add_argument("--task-notes", action="store_true",
                         help="append demonstration-derived hints (not zero-shot)")
-    parser.add_argument("--force-feedback", action="store_true",
-                        help="include Panda wrist six-axis force/torque sensor values in observations")
-    parser.add_argument("--vision-assist", action="store_true",
-                        help="include fast, training-free Panda image-region proposals")
-    parser.add_argument("--compliant-control", action="store_true",
-                        help="enable Panda world-axis Cartesian admittance after force-confirmed contact")
-    parser.add_argument("--compliant-axis", choices=("x", "y", "z"), default="z")
-    parser.add_argument("--compliant-target-force-n", type=float, default=-2.0)
-    parser.add_argument("--compliant-contact-threshold-n", type=float, default=1.0)
-    parser.add_argument("--compliant-gain-m-per-n", type=float, default=0.0003)
     parser.add_argument("--prior-learnings", type=Path,
                         help="optional rollout-context notes injected separately from base system docs")
     parser.add_argument("--output", type=Path, required=True, help="new directory for this run")
@@ -103,8 +93,6 @@ def main() -> None:
     args = parser.parse_args()
     if not args.execute_paid_rollouts:
         parser.error("paid requests require --execute-paid-rollouts")
-    if args.compliant_control and not args.force_feedback:
-        parser.error("--compliant-control requires --force-feedback")
     if args.total_budget <= 0 or args.episode_budget <= 0:
         parser.error("budgets must be positive")
     if not 0 <= args.start < args.start + args.episodes <= NUM_INIT_STATES:
@@ -186,13 +174,6 @@ def main() -> None:
         "episode_budget": args.episode_budget,
         "zero_shot": args.demo_manifest is None and not args.task_notes,
         "task_notes": args.task_notes,
-        "force_feedback": args.force_feedback,
-        "vision_assist": args.vision_assist,
-        "compliant_control": args.compliant_control,
-        "compliant_axis": args.compliant_axis,
-        "compliant_target_force_n": args.compliant_target_force_n,
-        "compliant_contact_threshold_n": args.compliant_contact_threshold_n,
-        "compliant_gain_m_per_n": args.compliant_gain_m_per_n,
         "demonstrations": json.loads(args.demo_manifest.read_text()) if args.demo_manifest else False,
         "prior_learnings": str(args.prior_learnings.resolve()) if args.prior_learnings else None,
         "upstream_commit": (ROOT / "upstream_commit.txt").read_text().strip(),
@@ -221,14 +202,7 @@ def main() -> None:
             folder = output / f"episode_{ep:02d}"
             embodiment = LiberoEmbodiment(task_id=args.task_id, suite=args.suite, output_dir=folder,
                                           libero_python=libero_python,
-                                          task_notes=args.task_notes,
-                                          force_feedback=args.force_feedback,
-                                          vision_assist=args.vision_assist,
-                                          compliant_control=args.compliant_control,
-                                          compliant_axis=args.compliant_axis,
-                                          compliant_target_force_n=args.compliant_target_force_n,
-                                          compliant_contact_threshold_n=args.compliant_contact_threshold_n,
-                                          compliant_gain_m_per_n=args.compliant_gain_m_per_n)
+                                          task_notes=args.task_notes)
             policy_options = {
                 "model": policy_model, "base_url": policy_base_url, "api_key_env": key_env,
                 "env": {key_env: settings[key_env]}, "wire": wire,

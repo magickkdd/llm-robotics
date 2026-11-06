@@ -1,4 +1,4 @@
-  <body name="end_effector_parts">
+<body name="end_effector_parts">
   <site name="ft_sensor_site" pos="0 0 0" quat="0.70710678 0 0.70710678 0" size="0.001" rgba="0 0 0 0" />
   <!-- 这个文件是“零件片段”：include 时根 body 会被剥掉，下面内容合并到外层 body。
        外层 body 的名字/位姿由 end_effector.xml 或 scene.xml 决定。 -->
@@ -23,36 +23,18 @@
 
   <!-- NS.10LA 套筒：绕自身轴线（工具 +X）旋转 -->
   <body name="socket" pos="0.4589 0 0">
-    <joint name="socket_joint" type="hinge" axis="1 0 0" limited="false"
+    <joint name="socket_joint" type="hinge" axis="1 0 0"
            damping="0.2" frictionloss="0.001" armature="0.01"/>
     <inertial pos="-0.0054 0 0" mass="0.05" diaginertia="3.8e-6 2.14e-5 2.14e-5"/>
 
     <geom name="socket_visual" type="mesh" mesh="socket_ns10la" material="metal"
           contype="0" conaffinity="0" group="2"/>
-    <geom name="socket_lip_0" type="box" pos="0.0385 0.0055 0"
-          size="0.0005 0.0025 0.0013" group="3" condim="4"
-          friction="1 0.02 0.01" contype="0" conaffinity="0"/>
-    <geom name="socket_lip_1" type="box" pos="0.0385 0.00275 0.004763"
-          quat="0.8660254 0.5 0 0" size="0.0005 0.0025 0.0013"
-          group="3" condim="4" friction="1 0.02 0.01" contype="0" conaffinity="0"/>
-    <geom name="socket_lip_2" type="box" pos="0.0385 -0.00275 0.004763"
-          quat="0.5 0.8660254 0 0" size="0.0005 0.0025 0.0013"
-          group="3" condim="4" friction="1 0.02 0.01" contype="0" conaffinity="0"/>
-    <geom name="socket_lip_3" type="box" pos="0.0385 -0.0055 0"
-          quat="0 1 0 0" size="0.0005 0.0025 0.0013" group="3"
-          condim="4" friction="1 0.02 0.01" contype="0" conaffinity="0"/>
-    <geom name="socket_lip_4" type="box" pos="0.0385 -0.00275 -0.004763"
-          quat="-0.5 0.8660254 0 0" size="0.0005 0.0025 0.0013"
-          group="3" condim="4" friction="1 0.02 0.01" contype="0" conaffinity="0"/>
-    <geom name="socket_lip_5" type="box" pos="0.0385 0.00275 -0.004763"
-          quat="-0.8660254 0.5 0 0" size="0.0005 0.0025 0.0013"
-          group="3" condim="4" friction="1 0.02 0.01" contype="0" conaffinity="0"/>
-    <geom name="socket_wall_0" type="box" pos="0.036 0.005369 0.0031" quat="0.9659258 0.258819 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
-    <geom name="socket_wall_1" type="box" pos="0.036 0 0.0062" quat="0.7071068 0.7071068 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
-    <geom name="socket_wall_2" type="box" pos="0.036 -0.005369 0.0031" quat="0.258819 0.9659258 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
-    <geom name="socket_wall_3" type="box" pos="0.036 -0.005369 -0.0031" quat="-0.258819 0.9659258 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
-    <geom name="socket_wall_4" type="box" pos="0.036 0 -0.0062" quat="-0.7071068 0.7071068 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
-    <geom name="socket_wall_5" type="box" pos="0.036 0.005369 -0.0031" quat="-0.9659258 0.258819 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
+    <geom name="socket_wall_0" type="box" pos="0.036 0.005066 0.002925" quat="0.9659258 0.258819 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
+    <geom name="socket_wall_1" type="box" pos="0.036 0 0.00585" quat="0.7071068 0.7071068 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
+    <geom name="socket_wall_2" type="box" pos="0.036 -0.005066 0.002925" quat="0.258819 0.9659258 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
+    <geom name="socket_wall_3" type="box" pos="0.036 -0.005066 -0.002925" quat="-0.258819 0.9659258 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
+    <geom name="socket_wall_4" type="box" pos="0.036 0 -0.00585" quat="-0.7071068 0.7071068 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
+    <geom name="socket_wall_5" type="box" pos="0.036 0.005066 -0.002925" quat="-0.9659258 0.258819 0 0" size="0.003 0.0007 0.006" group="3" condim="4" friction="1 0.02 0.01" contype="1" conaffinity="2"/>
 
     <site name="socket_center" pos="0 0 0" size="0.008 0.008 0.008" rgba="0.2 0.9 0.2 0.6"/>
     <site name="tool_tip" pos="0.039 0 0" size="0.008 0.008 0.008" rgba="0.2 0.9 0.2 0.6"/>

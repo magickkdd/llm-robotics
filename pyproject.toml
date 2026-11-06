@@ -22,7 +22,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-panda-vision = ["opencv-python-headless>=4.8"]
 
 # Entry-point discovery: once installed, `inspect-robots list` shows these
 # without importing the package first.

@@ -121,7 +121,7 @@
                   <site name="attachment_site" pos="0 0.1543 0" quat="-1 1 0 0" />
                   <body name="end_effector" pos="0 0.1543 0" quat="0.70710678 0 0 0.70710678" gravcomp="1">
                     <include file="workcell/parts/end_effector_body.xml" />
-                    <camera name="wristview" pos="0.405 -0.055 0.045" mode="targetbody" target="screw_m6" fovy="52" />
+                    <camera name="wristview" pos="0.26 0.08 0" quat="0.49999075 0.49999930 -0.50000924 -0.50000071" mode="fixed" fovy="52" />
                   </body>
                 </body>
               </body>
@@ -141,9 +141,6 @@
     </body>
     <geom name="workbench" type="box" pos="0.5 1.0 -0.04" size="0.8 0.7 0.04" material="floor" contype="2" conaffinity="3" />
     <camera name="agentview" pos="1.40104 1.60104 0.20" quat="0.270598 0.270598 0.653281 0.653281" mode="fixed" fovy="20" />
-    <camera name="screw_front" pos="0.68 1.0 0.20" mode="targetbody" target="screw_m6" fovy="35" />
-    <camera name="screw_side" pos="0.80 1.18 0.20" mode="targetbody" target="screw_m6" fovy="35" />
-    <camera name="screw_back" pos="0.92 1.0 0.20" mode="targetbody" target="screw_m6" fovy="35" />
   </worldbody>
   <actuator>
     <motor name="shoulder_pan" joint="shoulder_pan_joint" ctrlrange="-738 738" forcerange="-738 738" />
@@ -159,7 +156,6 @@
   </keyframe>
   <equality>
     <joint name="screw_rotation_lock" joint1="screw_spin" polycoef="0 0 0 0 0" solref="0.002 1" />
-    <joint name="socket_screw_rotation_coupling" joint1="screw_spin" joint2="socket_joint" polycoef="0 -1 0 0 0" active="false" solref="0.002 1" />
     <joint name="screw_height_lock" joint1="screw_lift" polycoef="0 0 0 0 0" solref="0.002 1" />
   </equality>
   <contact>

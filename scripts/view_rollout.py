@@ -260,41 +260,6 @@ def _dashboard_data(run_dir: Path, episode_dir: Path, log: dict, result: dict) -
     }
 
 
-def _socket_opening_dashboard_data(source: Path) -> dict:
-    rows = _load_jsonl(source / "trajectory.jsonl")
-    points = []
-    for row in rows:
-        position = row.get("socket_opening_center_world_m")
-        if not isinstance(position, list) or len(position) != 3:
-            continue
-        points.append({
-            "x": float(position[0]),
-            "y": float(position[1]),
-            "z": float(position[2]),
-            "t": float(row.get("sim_time_s", len(points))),
-        })
-    result_path = source / "result.json"
-    result = _load_json(result_path) if result_path.is_file() else {}
-    metadata_path = source / "metadata.json"
-    metadata = _load_json(metadata_path) if metadata_path.is_file() else {}
-    return {
-        "model": "MuJoCo UR20",
-        "effort": "Ground-truth trace",
-        "task": "Socket search",
-        "state": metadata.get("state_id", "—"),
-        "outcome": str(result.get("status", "recording")).replace("_", " ").title(),
-        "steps": len(points),
-        "calls": 0,
-        "cost": "—",
-        "instruction": "Socket opening-center world trajectory",
-        "video": None,
-        "calls_data": [],
-        "trajectory": points,
-        "trajectory_label": "Socket opening center",
-        "error": None,
-    }
-
-
 def render_dashboard(data: dict) -> str:
     escaped = html.escape
     video_panel = (
@@ -344,14 +309,14 @@ __ROLLOUT_SELECTOR__
 <div class="subtitle" id="subtitle"></div>
 <div class="stats"><div class="stat"><span class="label">Outcome</span><span id="outcome" class="value"></span></div><div class="stat"><span class="label">Steps</span><span id="steps" class="value"></span></div><div class="stat"><span class="label">Calls</span><span id="calls-count" class="value"></span></div><div class="stat"><span class="label">Cost</span><span id="cost" class="value"></span></div></div>
 <div class="columns"><section><h2 class="section-title">Rollout video</h2><div class="video-wrap">__VIDEO__</div><p class="hint">Agent view and wrist view are shown side by side when available.</p></section>
-<section><h2 class="section-title">3D spatial plan</h2><div class="card"><div class="plot-head"><span>Position marker</span><span class="toggle">● __TRAJECTORY_LABEL__&nbsp;&nbsp; ◆ Recorded path</span></div><svg id="plot" class="plot" viewBox="0 0 600 330" role="img" aria-label="__TRAJECTORY_LABEL__ trajectory plot"></svg><div class="plot-controls"><button id="play">Play 3D timeline</button><div class="progress"><div class="progress-label">Trajectory progress</div><input id="progress" type="range" min="0" max="100" value="0"></div></div><div id="plan-note" class="plan-note"></div></div>
+<section><h2 class="section-title">3D spatial plan</h2><div class="card"><div class="plot-head"><span>Position marker</span><span class="toggle">● End effector&nbsp;&nbsp; ◆ Planned path</span></div><svg id="plot" class="plot" viewBox="0 0 600 330" role="img" aria-label="End-effector trajectory plot"></svg><div class="plot-controls"><button id="play">Play 3D timeline</button><div class="progress"><div class="progress-label">Rollout progress</div><input id="progress" type="range" min="0" max="100" value="0"></div></div><div id="plan-note" class="plan-note"></div></div>
 <div class="card timeline"><div class="timeline-head"><span>View full reasoning timeline</span><span id="call-total" class="hint"></span></div><div id="timeline" class="timeline-list"></div></div></section></div>
 <div id="error" class="error" hidden></div></main>
 <script>
 const data=__DATA__;
 const video=document.getElementById('rollout-video');
 const events=data.calls_data||[], points=data.trajectory||[];
-document.getElementById('subtitle').textContent=data.trajectory_label?`${data.trajectory_label} · World-frame MuJoCo ground truth`:`${data.model} / ${data.effort} · Task ${String(data.task).padStart(2,'0')} · state ${data.state}`;
+document.getElementById('subtitle').textContent=`${data.model} / ${data.effort} · Task ${String(data.task).padStart(2,'0')} · state ${data.state}`;
 document.getElementById('outcome').textContent=data.outcome;
 document.getElementById('outcome').classList.add(data.outcome==='Success'?'success':'failure');
 document.getElementById('steps').textContent=data.steps;
@@ -363,27 +328,18 @@ const svg=document.getElementById('plot');
 const ns='http://www.w3.org/2000/svg';
 function el(tag,attrs={}){const node=document.createElementNS(ns,tag);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,value);return node;}
 const plotPoints=points.length?points:[{x:0,y:0,z:0}];
-const worldX=plotPoints.map(point=>point.x),worldY=plotPoints.map(point=>point.y),worldZ=plotPoints.map(point=>point.z);
-const bounds={minX:Math.min(...worldX),maxX:Math.max(...worldX),minY:Math.min(...worldY),maxY:Math.max(...worldY),minZ:Math.min(0,...worldZ),maxZ:Math.max(...worldZ)};
-for(const key of ['x','y']){const span=bounds[`max${key.toUpperCase()}`]-bounds[`min${key.toUpperCase()}`];if(span<.01){bounds[`min${key.toUpperCase()}`]-=.01;bounds[`max${key.toUpperCase()}`]+=.01;}}
-const marginX=Math.max(.01,(bounds.maxX-bounds.minX)*.12),marginY=Math.max(.01,(bounds.maxY-bounds.minY)*.12);
-bounds.minX-=marginX;bounds.maxX+=marginX;bounds.minY-=marginY;bounds.maxY+=marginY;
-const rawProject=point=>[point.x-point.y,(point.x+point.y)*.35-point.z*1.6];
-const boundsPoints=[...plotPoints,{x:bounds.minX,y:bounds.minY,z:0},{x:bounds.minX,y:bounds.maxY,z:0},{x:bounds.maxX,y:bounds.minY,z:0},{x:bounds.maxX,y:bounds.maxY,z:0},{x:bounds.minX,y:bounds.minY,z:bounds.maxZ}].map(rawProject);
-const minScreenX=Math.min(...boundsPoints.map(point=>point[0])),maxScreenX=Math.max(...boundsPoints.map(point=>point[0]));
-const minScreenY=Math.min(...boundsPoints.map(point=>point[1])),maxScreenY=Math.max(...boundsPoints.map(point=>point[1]));
-const centerX=(minScreenX+maxScreenX)/2,centerY=(minScreenY+maxScreenY)/2;
-const scale=Math.min(470/Math.max(maxScreenX-minScreenX,.01),225/Math.max(maxScreenY-minScreenY,.01));
-function project(point){const raw=rawProject(point);return [300+(raw[0]-centerX)*scale,168+(raw[1]-centerY)*scale];}
+const projectedRaw=plotPoints.map(point=>({x:point.x-point.y,y:-point.z*1.45+(point.x+point.y)*.42}));
+const minX=Math.min(...projectedRaw.map(point=>point.x)),maxX=Math.max(...projectedRaw.map(point=>point.x));
+const minY=Math.min(...projectedRaw.map(point=>point.y)),maxY=Math.max(...projectedRaw.map(point=>point.y));
+const centerX=(minX+maxX)/2,centerY=(minY+maxY)/2;
+const scale=Math.min(520/Math.max(maxX-minX,.01),260/Math.max(maxY-minY,.01));
+function project(point){return [300+(point.x-point.y-centerX)*scale,175+(-point.z*1.45+(point.x+point.y)*.42-centerY)*scale];}
 const maxStep=Math.max(1,...points.map(point=>Number(point.t)||0));
 function drawPlot(progress=1){svg.replaceChildren();
+ const axisOrigin={x:0,y:0,z:0};
+ const axes=[{end:{x:.42,y:0,z:0},color:'#e98273',label:'x'},{end:{x:0,y:.42,z:0},color:'#6ed7a3',label:'y'},{end:{x:0,y:0,z:.45},color:'#72c8ff',label:'z'}];
+ for(const axis of axes){const origin=project(axisOrigin),end=project({x:axisOrigin.x+axis.end.x,y:axisOrigin.y+axis.end.y,z:axisOrigin.z+axis.end.z});svg.append(el('line',{x1:origin[0],y1:origin[1],x2:end[0],y2:end[1],stroke:axis.color,'stroke-width':2}));const label=el('text',{x:end[0]+5,y:end[1]+3,fill:axis.color,'font-size':12});label.textContent=axis.label;svg.append(label);}
  if(points.length<1){const text=el('text',{x:300,y:175,fill:'#9aabba','text-anchor':'middle','font-size':13});text.textContent='No executed trajectory in this rollout';svg.append(text);return;}
- const floorCorners=[{x:bounds.minX,y:bounds.minY,z:0},{x:bounds.maxX,y:bounds.minY,z:0},{x:bounds.maxX,y:bounds.maxY,z:0},{x:bounds.minX,y:bounds.maxY,z:0}].map(project);
- svg.append(el('polygon',{points:floorCorners.map(point=>point.join(',')).join(' '),fill:'#173248',opacity:.56,stroke:'#4e7189','stroke-width':1}));
- for(let index=1;index<4;index++){const fraction=index/4,x=bounds.minX+(bounds.maxX-bounds.minX)*fraction,y=bounds.minY+(bounds.maxY-bounds.minY)*fraction;const alongX=[project({x,y:bounds.minY,z:0}),project({x,y:bounds.maxY,z:0})],alongY=[project({x:bounds.minX,y,z:0}),project({x:bounds.maxX,y,z:0})];for(const line of [alongX,alongY])svg.append(el('line',{x1:line[0][0],y1:line[0][1],x2:line[1][0],y2:line[1][1],stroke:'#36536a','stroke-width':1,opacity:.7}));}
- const axisBase={x:bounds.minX,y:bounds.minY,z:0};
- const axes=[{end:{x:bounds.maxX,y:bounds.minY,z:0},color:'#e98273',label:'X'},{end:{x:bounds.minX,y:bounds.maxY,z:0},color:'#6ed7a3',label:'Y'},{end:{x:bounds.minX,y:bounds.minY,z:bounds.maxZ||.1},color:'#72c8ff',label:'Z'}];
- for(const axis of axes){const origin=project(axisBase),end=project(axis.end);svg.append(el('line',{x1:origin[0],y1:origin[1],x2:end[0],y2:end[1],stroke:axis.color,'stroke-width':2}));const label=el('text',{x:end[0]+5,y:end[1]+3,fill:axis.color,'font-size':12,'font-weight':700});label.textContent=axis.label;svg.append(label);}
  const currentStep=Math.max(0,Math.min(maxStep,progress*maxStep));
  let visible=points.filter(point=>(Number(point.t)||0)<=currentStep);
  if(!visible.length)visible=[points[0]];
@@ -392,12 +348,7 @@ function drawPlot(progress=1){svg.replaceChildren();
  const projected=visible.map(project);
  if(projected.length>1){svg.append(el('polyline',{points:projected.map(p=>p.join(',')).join(' '),fill:'none',stroke:'#72c8ff','stroke-width':3,'stroke-linecap':'round','stroke-linejoin':'round'}));}
  for(let index=0;index<projected.length;index+=Math.max(1,Math.floor(projected.length/18))){svg.append(el('circle',{cx:projected[index][0],cy:projected[index][1],r:3,fill:'#9bd9ff',opacity:.7}));}
- const currentPoint=visible[visible.length-1],current=projected[projected.length-1],ground=project({x:currentPoint.x,y:currentPoint.y,z:0});
- svg.append(el('line',{x1:current[0],y1:current[1],x2:ground[0],y2:ground[1],stroke:'#ffd166','stroke-width':2,'stroke-dasharray':'4 4',opacity:.9}));
- svg.append(el('ellipse',{cx:ground[0],cy:ground[1],rx:7,ry:3,fill:'#ffd166',opacity:.78}));
- svg.append(el('circle',{cx:current[0],cy:current[1],r:10,fill:'#72c8ff',stroke:'#e7f7ff','stroke-width':2}));
- svg.append(el('circle',{cx:current[0]-3,cy:current[1]-3,r:3,fill:'#fff',opacity:.9}));
- const coords=el('text',{x:Math.min(500,current[0]+14),y:Math.max(18,current[1]-12),fill:'#f5fbff','font-size':11,'font-weight':700,'paint-order':'stroke','stroke':'#091724','stroke-width':3});coords.textContent=`x ${currentPoint.x.toFixed(3)}  y ${currentPoint.y.toFixed(3)}  z ${currentPoint.z.toFixed(3)} m`;svg.append(coords);
+ const current=projected[projected.length-1];svg.append(el('circle',{cx:current[0],cy:current[1],r:7,fill:'#72c8ff',stroke:'#d7f1ff','stroke-width':2}));
 }
 drawPlot();
 const timeline=document.getElementById('timeline');
@@ -411,9 +362,9 @@ events.forEach((event,index)=>{const args=event.arguments||{},card=document.crea
  card.addEventListener('click',()=>{document.querySelectorAll('.event.active').forEach(node=>node.classList.remove('active'));card.classList.add('active');const fraction=eventStep/maxStep;if(video&&video.duration)video.currentTime=Math.min(time,video.duration);document.getElementById('progress').value=fraction*100;drawPlot(fraction);document.getElementById('plan-note').textContent=args.note||args.reason||'Selected action';});
  timeline.append(card);
 });
-document.getElementById('plan-note').textContent=points.length?`${points.length} ${data.trajectory_label||'end-effector'} samples · time in simulation seconds.`:'No trajectory was recorded for this episode.';
+document.getElementById('plan-note').textContent=points.length?`${points.length} end-effector positions from recorded actions.`:'No action trajectory was recorded for this episode.';
 document.getElementById('progress').addEventListener('input',event=>{const fraction=Number(event.target.value)/100;if(video&&video.duration)video.currentTime=fraction*video.duration;drawPlot(fraction);});
-document.getElementById('play').addEventListener('click',()=>{if(video){video.play();return;}const started=performance.now();const animate=now=>{const fraction=Math.min(1,(now-started)/6000);document.getElementById('progress').value=fraction*100;drawPlot(fraction);if(fraction<1)requestAnimationFrame(animate);};requestAnimationFrame(animate);});
+document.getElementById('play').addEventListener('click',()=>{if(video){video.play();}});
 function syncPlayback(){if(!video||!video.duration)return;const fraction=video.currentTime/video.duration;document.getElementById('progress').value=fraction*100;drawPlot(fraction);}
 if(video){video.addEventListener('timeupdate',syncPlayback);video.addEventListener('seeked',syncPlayback);}
 const picker=document.getElementById('rollout-picker');
@@ -426,7 +377,7 @@ if(search)search.value=params.get('q')||'';
 filters.forEach(filter=>{filter.value=params.get(filter.dataset.filter)||'';});
 function persistPickerState(){const state=new URLSearchParams();if(search?.value)state.set('q',search.value);filters.forEach(filter=>{if(filter.value)state.set(filter.dataset.filter,filter.value);});return state.toString();}
 if(picker)picker.addEventListener('change',()=>{const query=persistPickerState();location.href=picker.value+(query?`?${query}`:'');});
-</script></body></html>""".replace("__VIDEO__", video_panel).replace("__DATA__", _safe_json(data)).replace("__ROLLOUT_SELECTOR__", rollout_selector).replace("__TRAJECTORY_LABEL__", html.escape(data.get("trajectory_label", "End effector")))
+</script></body></html>""".replace("__VIDEO__", video_panel).replace("__DATA__", _safe_json(data)).replace("__ROLLOUT_SELECTOR__", rollout_selector)
 
 
 def _rollout_entries(root: Path) -> list[tuple[Path, int, dict, dict]]:
@@ -469,29 +420,6 @@ def main() -> None:
     args = parser.parse_args()
 
     source = args.source.resolve()
-    if (source / "trajectory.jsonl").is_file():
-        report = source / "socket_opening_trajectory.html"
-        report.write_text(
-            render_dashboard(_socket_opening_dashboard_data(source)), encoding="utf-8"
-        )
-        print(f"Viewer report: {report}")
-        if args.serve:
-            catalog_root = source.parent
-            handler = lambda *handler_args, **handler_kwargs: SimpleHTTPRequestHandler(
-                *handler_args, directory=str(catalog_root), **handler_kwargs
-            )
-            server = ThreadingHTTPServer((args.host, args.port), handler)
-            report_url = quote(
-                (source.name + "/" + report.name), safe="/"
-            )
-            print(f"Open http://{args.host}:{server.server_port}/{report_url}")
-            try:
-                server.serve_forever()
-            except KeyboardInterrupt:
-                pass
-            finally:
-                server.server_close()
-        return
     direct_source = (
         (source / f"episode_{args.episode:02d}" / "inspect").is_dir()
         or (source / "inspect").is_dir()
