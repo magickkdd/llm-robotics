@@ -1,0 +1,38 @@
+{
+  "status": "socket_engaged",
+  "search_points_executed": 1,
+  "tactile_seated": false,
+  "tactile_candidate": false,
+  "socket_engaged_at_end": true,
+  "socket_contact_at_end": true,
+  "socket_axial_error_m_at_end": -0.003910740786688119,
+  "socket_radial_error_m_at_end": 1.6871160012123748e-05,
+  "socket_engaged_seen": true,
+  "socket_engagement_ticks_at_end": 430,
+  "max_socket_engagement_ticks": 430,
+  "tool_tip_world_m_at_end": [
+    0.8000111532462288,
+    0.999999427882852,
+    0.1490665401104247
+  ],
+  "true_screw_center_world_m_private": [
+    0.8,
+    1.0
+  ],
+  "true_xy_error_mm_private": [
+    0.011153246228801095,
+    -0.0005721171479899922
+  ],
+  "force_compensated_n_nm_at_end": [
+    -0.08533250433483097,
+    0.04787049106287379,
+    0.471756032308285,
+    -0.008464013233676324,
+    -0.010229666994858853,
+    0.002598551705751783
+  ],
+  "spiral_phase_offset_rad": 0.0,
+  "simulation_steps": 943,
+  "simulation_time_s": 1.8860000000000015,
+  "llm_calls": 0
+}

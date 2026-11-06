@@ -368,6 +368,19 @@ embodiment and policy as the CLI, with these additions:
   episodes.
 - It writes `protocol.json` (everything needed to reproduce the run) and
   `summary.json` (one result row per episode).
+- The LIBERO Panda embodiment can optionally expose its native MuJoCo wrist
+  force/torque sensor with `--force-feedback`; this is off by default. The
+  six values are reported in the gripper FT-site frame (N and Nm), include
+  gravity/motion effects, and are not a binary contact flag.
+- `--vision-assist` optionally adds fast, training-free color-contrast region
+  proposals for both Panda cameras. They are image-space candidates, not
+  semantic detections or simulator-state coordinates; the model must identify
+  the target from the task and original RGB images. Install `.[panda-vision]`
+  in the LIBERO worker environment to enable this adapter.
+- `--compliant-control --force-feedback` enables Panda-specific, outer-loop
+  Cartesian admittance after contact force is observed. It is a small signed
+  force correction on one selected world axis, not direct torque control; its
+  force target, threshold, and gain can be configured independently of UR20.
 
 The paid runner accepts the native `libero_spatial`, `libero_object`,
 `libero_goal`, `libero_10`, and `libero_90` suites. Task ids use each suite's
@@ -390,6 +403,16 @@ python scripts/run_budgeted_rollouts.py \
   --output outputs/task02_opus_zeroshot \
   --execute-paid-rollouts
 ```
+
+Add `--force-feedback` to opt in to the Panda force/torque observation; normal
+LIBERO runs remain vision-and-proprioception only. Add `--vision-assist` to
+include the Panda-specific image-region candidates as well.
+To also enable compliance, pass both `--force-feedback --compliant-control`;
+the initial Panda defaults are world Z, a -2 N sensor-force target, a 1 N
+contact threshold, and a 0.3 mm/(N·step) correction gain with a 0.3 mm
+per-step correction cap. After contact is detected, compliance stays engaged
+while the requested motion continues along the force axis and releases when
+the model requests motion in the opposite direction.
 
 For example, a DeepSeek run uses `--model openai/deepseek-v4.1-flash-1017
 --profile deepseek`; a Luna run uses `--model openai/gpt-6-luna --profile luna`.

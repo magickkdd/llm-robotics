@@ -1,0 +1,186 @@
+{
+  "target_force_n": 3,
+  "source_seed": 20261106,
+  "cases": [
+    {
+      "case": 1,
+      "requested_offset_mm": [
+        2.784,
+        1.7263
+      ],
+      "requested_offset_norm_mm": 3.2757850494194516,
+      "measured_start_offset_norm_mm": 3.2757848406925185,
+      "screw_hex_angle_deg": 14.105,
+      "status": "socket_engaged",
+      "search_points": 231,
+      "success": true,
+      "axial_insertion_mm": 3.9007293895480233,
+      "radial_error_mm": 0.03317250796389299,
+      "stable_ticks": 481,
+      "xy_tracking_p95_mm": 0.5818573957917913,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_01"
+    },
+    {
+      "case": 2,
+      "requested_offset_mm": [
+        -1.4557,
+        2.8538
+      ],
+      "requested_offset_norm_mm": 3.203628712881691,
+      "measured_start_offset_norm_mm": 3.2036286047415983,
+      "screw_hex_angle_deg": 59.884,
+      "status": "socket_engaged",
+      "search_points": 208,
+      "success": true,
+      "axial_insertion_mm": 3.9020137428307846,
+      "radial_error_mm": 0.048145283661578095,
+      "stable_ticks": 53,
+      "xy_tracking_p95_mm": 0.36545236448022045,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_02"
+    },
+    {
+      "case": 3,
+      "requested_offset_mm": [
+        3.7614,
+        0.2747
+      ],
+      "requested_offset_norm_mm": 3.771417512023828,
+      "measured_start_offset_norm_mm": 3.771417353258097,
+      "screw_hex_angle_deg": 1.495,
+      "status": "socket_engaged",
+      "search_points": 242,
+      "success": true,
+      "axial_insertion_mm": 3.90077681065829,
+      "radial_error_mm": 0.04727351448080579,
+      "stable_ticks": 453,
+      "xy_tracking_p95_mm": 0.6746731548461377,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_03"
+    },
+    {
+      "case": 4,
+      "requested_offset_mm": [
+        -0.2328,
+        1.6259
+      ],
+      "requested_offset_norm_mm": 1.642481856825213,
+      "measured_start_offset_norm_mm": 1.6424816739751131,
+      "screw_hex_angle_deg": 8.237,
+      "status": "socket_engaged",
+      "search_points": 100,
+      "success": true,
+      "axial_insertion_mm": 3.903812835034363,
+      "radial_error_mm": 0.08780734774411393,
+      "stable_ticks": 92,
+      "xy_tracking_p95_mm": 0.35508785752185335,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_04"
+    },
+    {
+      "case": 5,
+      "requested_offset_mm": [
+        1.5883,
+        1.7649
+      ],
+      "requested_offset_norm_mm": 2.374356523355328,
+      "measured_start_offset_norm_mm": 2.374356286265876,
+      "screw_hex_angle_deg": 53.409,
+      "status": "socket_engaged",
+      "search_points": 127,
+      "success": true,
+      "axial_insertion_mm": 3.9008259191382693,
+      "radial_error_mm": 0.060254697082395434,
+      "stable_ticks": 271,
+      "xy_tracking_p95_mm": 0.4728344185976011,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_05"
+    },
+    {
+      "case": 6,
+      "requested_offset_mm": [
+        -0.2286,
+        -0.9929
+      ],
+      "requested_offset_norm_mm": 1.0188760326948516,
+      "measured_start_offset_norm_mm": 1.0188763240721403,
+      "screw_hex_angle_deg": 41.645,
+      "status": "socket_engaged",
+      "search_points": 46,
+      "success": true,
+      "axial_insertion_mm": 3.9136244674796923,
+      "radial_error_mm": 0.04253025504262662,
+      "stable_ticks": 76,
+      "xy_tracking_p95_mm": 0.8185390170833752,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_06"
+    },
+    {
+      "case": 7,
+      "requested_offset_mm": [
+        -0.9296,
+        -0.4651
+      ],
+      "requested_offset_norm_mm": 1.039458594653967,
+      "measured_start_offset_norm_mm": 1.0394588909230644,
+      "screw_hex_angle_deg": 57.98,
+      "status": "socket_engaged",
+      "search_points": 1,
+      "success": true,
+      "axial_insertion_mm": 3.910740786688119,
+      "radial_error_mm": 0.01687116001212375,
+      "stable_ticks": 430,
+      "xy_tracking_p95_mm": null,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_07"
+    },
+    {
+      "case": 8,
+      "requested_offset_mm": [
+        -3.6496,
+        0.4382
+      ],
+      "requested_offset_norm_mm": 3.675812753664147,
+      "measured_start_offset_norm_mm": 3.6758129436814557,
+      "screw_hex_angle_deg": 30.96,
+      "status": "socket_engaged",
+      "search_points": 193,
+      "success": true,
+      "axial_insertion_mm": 4.03002542684278,
+      "radial_error_mm": 0.5776268947949348,
+      "stable_ticks": 193,
+      "xy_tracking_p95_mm": 0.5667366793584363,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_08"
+    },
+    {
+      "case": 9,
+      "requested_offset_mm": [
+        3.162,
+        -1.1823
+      ],
+      "requested_offset_norm_mm": 3.3758076500298415,
+      "measured_start_offset_norm_mm": 3.3758075647125128,
+      "screw_hex_angle_deg": 52.723,
+      "status": "socket_engaged",
+      "search_points": 247,
+      "success": true,
+      "axial_insertion_mm": 3.9850228822229368,
+      "radial_error_mm": 0.043558889736387094,
+      "stable_ticks": 482,
+      "xy_tracking_p95_mm": 0.7846583907257524,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_09"
+    },
+    {
+      "case": 10,
+      "requested_offset_mm": [
+        -3.2924,
+        -0.9616
+      ],
+      "requested_offset_norm_mm": 3.4299522329035432,
+      "measured_start_offset_norm_mm": 3.429952551293764,
+      "screw_hex_angle_deg": 43.9,
+      "status": "socket_engaged",
+      "search_points": 292,
+      "success": true,
+      "axial_insertion_mm": 3.9032313973377284,
+      "radial_error_mm": 0.05801322629698087,
+      "stable_ticks": 359,
+      "xy_tracking_p95_mm": 0.8705157890099071,
+      "output": "outputs/ur20_spiral_random_sweep_20261106_3n_retry/case_10"
+    }
+  ]
+}

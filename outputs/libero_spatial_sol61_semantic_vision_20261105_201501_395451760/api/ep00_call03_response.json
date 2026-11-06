@@ -1,0 +1,1 @@
+{"error":{"code":"400","message":"{\"code\":\"invalid_type\",\"message\":\"Invalid type for 'client_metadata.window_number': expected a string, but got an integer instead.\"}","type":"invalid_request_error"}}

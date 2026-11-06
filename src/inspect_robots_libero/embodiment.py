@@ -120,6 +120,13 @@ class LiberoEmbodiment(EmbodimentBase):
         libero_python: str | None = None,
         task_notes: bool = False,
         suite: str = "libero_10",
+        force_feedback: bool = False,
+        vision_assist: bool = False,
+        compliant_control: bool = False,
+        compliant_axis: str = "z",
+        compliant_target_force_n: float = -2.0,
+        compliant_contact_threshold_n: float = 1.0,
+        compliant_gain_m_per_n: float = 0.0003,
     ) -> None:
         if suite not in ("libero_10", "libero_object", "libero_spatial", "libero_goal", "libero_90"):
             raise ConfigError(f"unsupported LIBERO suite {suite!r}")
@@ -135,9 +142,56 @@ class LiberoEmbodiment(EmbodimentBase):
         self.init_state = init_state
         self.output = Path(output_dir)
         self.libero_python = libero_python or os.environ.get("LIBERO_PYTHON") or sys.executable
+        self.force_feedback = force_feedback
+        self.vision_assist = vision_assist
+        if compliant_control and not force_feedback:
+            raise ConfigError("compliant_control=True requires force_feedback=True")
+        if compliant_axis not in ("x", "y", "z"):
+            raise ConfigError("compliant_axis must be x, y, or z")
+        self.compliant_control = compliant_control
+        self.compliant_axis = compliant_axis
+        self.compliant_target_force_n = compliant_target_force_n
+        self.compliant_contact_threshold_n = compliant_contact_threshold_n
+        self.compliant_gain_m_per_n = compliant_gain_m_per_n
         if task_notes and self.task_id is None:
             raise ConfigError("task_notes=True needs an explicit task_id.\nfix: add -E task_id=N")
         docs = BASE_DOCS
+        if force_feedback:
+            docs += (
+                "\n\nOptional Panda wrist force/torque sensing is enabled. "
+                "wrist_ft_wrench is the six-axis reading at the Panda gripper's "
+                "MuJoCo FT site, expressed in that sensor frame: Fx,Fy,Fz in N, "
+                "then Tx,Ty,Tz in Nm. It is a raw simulated sensor reading and "
+                "can include gravity and motion effects; use changes and contact "
+                "context rather than treating a nonzero value alone as contact."
+            )
+        if vision_assist:
+            docs += (
+                "\n\nTraining-free Panda image-region proposals are enabled. "
+                "agentview_regions and wrist_regions contain rows [center_x, "
+                "center_y, width, height, score], normalized to [0,1]. Nonzero "
+                "rows are color-contrast regions, not semantic object detections "
+                "or simulator coordinates. Match them to the task using the RGB "
+                "images; score is a heuristic, not a probability. All-zero rows "
+                "mean no candidate was proposed. Select the task object from the "
+                "wrist image and pass its row index as visual_target_index in move_to. "
+                "The worker tracks only that selected proposal, converts its pixel "
+                "offset to a small world-frame Cartesian assist, and does not infer "
+                "object identity or read simulator coordinates."
+            )
+        if compliant_control:
+            docs += (
+                "\n\nPanda Cartesian admittance is enabled on world "
+                f"{compliant_axis.upper()} with a signed force target of "
+                f"{compliant_target_force_n:g} N. Bias-subtracted force in the "
+                "target direction reaching "
+                f"{compliant_contact_threshold_n:g} N engages a latched correction; "
+                "the target ramps from 0 N to the configured value over control cycles "
+                "and temporary image-confidence loss does not disable it. "
+                "The wrench baseline is captured at reset; this is a "
+                "Panda-specific outer-loop pose correction, not direct torque "
+                "control."
+            )
         if task_notes and self.task_id in TASK_NOTES:
             docs += "\n\n" + TASK_NOTES[self.task_id]
         name = suite if self.task_id is None else f"{suite}_task{self.task_id:02d}"
@@ -150,7 +204,21 @@ class LiberoEmbodiment(EmbodimentBase):
             observation_space=ObservationSpace(
                 cameras=tuple(CameraSpec(k, 256, 256) for k in ("agentview", "wrist")),
                 state=StateSpec(
-                    (StateField("eef_state", (10,)), StateField("gripper_qpos", (2,), "m"))
+                    tuple(
+                        [StateField("eef_state", (10,)), StateField("gripper_qpos", (2,), "m")]
+                        + ([StateField("wrist_ft_wrench", (6,), "N,Nm")] if force_feedback else [])
+                        + ([StateField("agentview_regions", (8, 5), "normalized image coords"),
+                            StateField("wrist_regions", (8, 5), "normalized image coords")]
+                           if vision_assist else [])
+                        + ([StateField("vision_pixel_offset", (2,), "pixels"),
+                            StateField("vision_cartesian_delta_world", (3,), "m"),
+                            StateField("vision_confidence", (1,))]
+                           if vision_assist else [])
+                        + ([StateField("wrist_force_delta_world", (3,), "N"),
+                            StateField("compliance_target_force_n", (1,), "N"),
+                            StateField("compliance_state", (2,))]
+                           if compliant_control else [])
+                    )
                 ),
             ),
             docs=docs,
@@ -181,6 +249,25 @@ class LiberoEmbodiment(EmbodimentBase):
             for name, key in (("agentview", "agentview_image"), ("wrist", "robot0_eye_in_hand_image"))
         }
         state = {key: np.asarray(data[key], dtype=float) for key in ("eef_state", "gripper_qpos")}
+        if self.force_feedback:
+            state["wrist_ft_wrench"] = np.asarray(data["wrist_ft_wrench"], dtype=float)
+        if self.vision_assist:
+            state["agentview_regions"] = np.asarray(data["agentview_regions"], dtype=float)
+            state["wrist_regions"] = np.asarray(data["wrist_regions"], dtype=float)
+            state["vision_pixel_offset"] = np.asarray(data["vision_pixel_offset"], dtype=float)
+            state["vision_cartesian_delta_world"] = np.asarray(
+                data["vision_cartesian_delta_world"], dtype=float
+            )
+            state["vision_confidence"] = np.asarray([data["vision_confidence"]], dtype=float)
+        if self.compliant_control:
+            state["wrist_force_delta_world"] = np.asarray(data["wrist_force_delta_world"], dtype=float)
+            state["compliance_target_force_n"] = np.asarray(
+                [data.get("compliance_target_force_n", 0.0)], dtype=float
+            )
+            state["compliance_state"] = np.asarray([
+                float(data.get("compliance_engaged", False)),
+                float(data.get("compliance_ramp_step", 0)),
+            ], dtype=float)
         return Observation(
             images=images,
             state=state,
@@ -247,6 +334,13 @@ class LiberoEmbodiment(EmbodimentBase):
                 "init_state": init_state,
                 "env_seed": int(env_seed),
                 "video": str(self.episode_dir / "rollout.mp4"),
+                "force_feedback": self.force_feedback,
+                "vision_assist": self.vision_assist,
+                "compliant_control": self.compliant_control,
+                "compliant_axis": self.compliant_axis,
+                "compliant_target_force_n": self.compliant_target_force_n,
+                "compliant_contact_threshold_n": self.compliant_contact_threshold_n,
+                "compliant_gain_m_per_n": self.compliant_gain_m_per_n,
             }
         )
         self.instruction = data["instruction"]
@@ -254,7 +348,11 @@ class LiberoEmbodiment(EmbodimentBase):
 
     def step(self, action: Action) -> StepResult:
         """Execute one 20 Hz absolute-pose action; terminate on LIBERO success."""
-        data = self._rpc({"op": "step", "action": np.asarray(action.data).tolist()})
+        data = self._rpc({
+            "op": "step",
+            "action": np.asarray(action.data).tolist(),
+            "visual_target_index": action.meta.get("visual_target_index"),
+        })
         success = bool(data["success"])
         return StepResult(
             self._observation(data),
