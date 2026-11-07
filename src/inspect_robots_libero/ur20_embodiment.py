@@ -28,13 +28,14 @@ PYTHON = os.environ.get(
 )
 MAX_CARTESIAN_TARGET_DELTA_M = 0.05
 XY_ALIGNMENT_TOLERANCE_M = 0.002
+XY_ALIGNMENT_RELEASE_TOLERANCE_M = 0.003
 VISION_XY_MOTION_MIN_CONFIDENCE = 0.7
 CONTACT_FORCE_THRESHOLD_N = 1.0
 LOCKED_APPROACH_STEP_M = 0.01
 COMPLIANT_APPROACH_DISTANCE_M = 0.05
 COMPLIANT_FULL_FORCE_DISTANCE_M = 0.01
 COMPLIANT_LATERAL_RELEASE_DISTANCE_M = 0.05
-COMPLIANT_FORCE_SETPOINT_N = 2.0
+COMPLIANT_FORCE_SETPOINT_N = 1.0
 
 
 def force_setpoint_for_vertical_gap(current_z: float, estimated_surface_z: float,
@@ -126,7 +127,7 @@ def prevent_unaligned_descent(current: np.ndarray, target: np.ndarray,
 
 class UR20ScrewEmbodiment(EmbodimentBase):
     def __init__(self, output_dir: str | os.PathLike[str] = "outputs/ur20_screw", state_id: int = 0,
-                 max_steps: int = 600, include_force: bool = False,
+                 max_steps: int = 7500, include_force: bool = False,
                  compliant_control: bool = False, spiral_search: bool = False,
                  mujoco_viewer: bool = False, action_amplification: float = 3.0,
                  twist_after_seating: bool = False) -> None:
@@ -192,7 +193,9 @@ class UR20ScrewEmbodiment(EmbodimentBase):
                 ),
             ),
             observation_space=ObservationSpace(
-                cameras=tuple(CameraSpec(name, 256, 256) for name in ("agentview", "wristview")),
+                cameras=tuple(CameraSpec(name, 256, 256) for name in (
+                    "agentview", "wristview", "screw_front", "screw_side", "screw_back"
+                )),
                 state=StateSpec((StateField("eef_pos", (3,)),
                                  StateField("vision_screw_center_px", (2,)),
                                  StateField("vision_screw_xy_estimate_m", (2,)),
@@ -208,6 +211,8 @@ class UR20ScrewEmbodiment(EmbodimentBase):
                                  *((StateField("spiral_axial_force_delta_n", (1,)),)
                                    if include_force and spiral_search else ()),
                                  *((StateField("spiral_search_state", (3,)),) if spiral_search else ()),
+                                 *((StateField("spiral_search_exhausted", (1,)),)
+                                   if spiral_search else ()),
                                  *((StateField("spiral_tactile_state", (7,)),)
                                    if include_force and spiral_search else ()),
                                  *((StateField("socket_turn_state", (3,)),) if twist_after_seating else ()))),
@@ -259,8 +264,10 @@ class UR20ScrewEmbodiment(EmbodimentBase):
                  "peak as contact evidence. " if include_force else "")
               + ("One OSC torque controller is used throughout. Axial force admittance "
                  "stays at 0 N while more than 5 cm above the calibrated nominal screw-top "
-                 "plane, then its target follows a smooth ramp from 0 N at 5 cm to 2 N at "
-                 "1 cm and remains 2 N after force-confirmed contact. The force zone is "
+                 "plane, then its target follows a smooth ramp from 0 N at 5 cm to 1 N at "
+                 "1 cm and remains at a 1 N setpoint after force-confirmed contact. This "
+                 "is a compliant control target, not a requirement that every force sample "
+                 "equal 1 N. The force zone is "
                  "armed by confident XY alignment or contact, then held through temporary "
                  "vision-confidence loss; it releases after moving more than 5 cm laterally "
                  "from the last valid screw estimate. The calibrated nominal plane is not "
@@ -272,27 +279,34 @@ class UR20ScrewEmbodiment(EmbodimentBase):
                  "hex-phase misalignment. The tip searches in "
                  "small planar increments while the socket rotates 60 degrees per "
                  "increment, with axial compliance maintained. spiral_search_state gives "
-                 "active, completed increment count, and force-guard status. spiral_tactile_state contains phase (0 waiting for axial-force drop, 1 waiting for sustained lateral-force rise, 2 calibrated seating, 3 uncalibrated candidate), confirmed-seated flag, axial-force drop from the search-start contact baseline in N, lateral force-vector change from its search-start baseline in N, consecutive confirmation samples, axial-drop event latch, and event age in physics samples. A candidate requires the 0.75 N axial-force drop and 0.75 N lateral force-vector rise to overlap, with both conditions holding for five consecutive physics samples; the axial-drop event expires after 25 samples. No extra downward displacement or axial-force recovery condition is used. Thresholds are not calibrated yet, so a candidate is not accepted as seated and cannot trigger turning or end the search. "
+                 "active, completed increment count, and force-guard status. Seating is "
+                 "confirmed from the force sensor and tool motion when the tool has moved "
+                 "down at least 3 mm from contact and axial force has recovered to at least "
+                 "10% of its contact baseline for 20 consecutive physics samples. The "
+                 "search returns only after this condition, a force guard, or one complete "
+                 "576-increment coverage. spiral_search_exhausted reports that coverage "
+                 "ended without tactile seating; return control to the LLM in that case. "
+                 "geometric engagement is diagnostic only and does not control the result. "
                  if spiral_search else "")
-              + ("After spiral_tactile_state reports seated, call turn_socket to rotate the socket "
-                 "counterclockwise by one revolution while maintaining axial contact. "
-                 "This simplified phase allows the screw to rotate in place but keeps its "
-                 "height fixed; it deliberately does not model thread pitch or extraction. "
+              + ("After stable socket engagement, call turn_socket when "
+                 "spiral_tactile_state reports seated. The operation rotates the socket "
+                 "counterclockwise through the modeled M6x1 thread until 21 mm extraction "
+                 "travel is completed. The controller follows the rising screw while "
+                 "maintaining axial compliance and returns only after extraction or a "
+                 "force/step safety stop. "
                  "socket_turn_state contains active, signed socket angle in radians, and "
                  "completion flag. "
                  if twist_after_seating else "")
-              + ("During spiral search, use the compensated force data: seating is "
-                 "confirmed only after the axial force drops from its search-start contact "
-                 "baseline and lateral force remains elevated relative to its own search-start "
-                 "baseline for five consecutive physics samples. A one-sample lateral spike "
-                 "does not count. No downward-motion or axial-force-recovery condition is "
-                 "part of the seating criterion. Do not retract merely because force briefly "
-                 "fluctuates; the controller continues its internal search until both force "
-                 "conditions are confirmed. "
+              + ("During spiral search, use the compensated force data and tool position; "
+                 "the seating signal requires at least 3 mm of downward travel followed by "
+                 "axial force recovery maintained for 20 physics samples. Do not infer "
+                 "seating from a transient force drop or geometric simulator state. "
                  if include_force and spiral_search else "")
-              + "Approach the external-hex head with visible clearance, align before "
-              "descending, and do not rotate to extract the screw. If uncertain, inspect "
-              "both labeled views before choosing the next motion."),
+              + "Approach the external-hex head with visible clearance and align before "
+              "descending. "
+              + ("Use turn_socket for the bounded threaded screw-extraction operation. "
+                 if twist_after_seating else "Do not rotate to extract the screw. ")
+              + "If uncertain, inspect both labeled views before choosing the next motion."),
         )
 
     def _rpc(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -352,6 +366,9 @@ class UR20ScrewEmbodiment(EmbodimentBase):
                 [data.get("spiral_axial_force_delta_n", 0.0)], dtype=float)
         if spiral_search:
             state["spiral_search_state"] = np.asarray(data["spiral_search_state"], dtype=float)
+            state["spiral_search_exhausted"] = np.array(
+                [float(data.get("spiral_search_exhausted", False))], dtype=float
+            )
         if include_force and spiral_search:
             state["spiral_tactile_state"] = np.asarray(
                 data.get("spiral_tactile_state", [0.0] * 7), dtype=float
@@ -388,7 +405,9 @@ class UR20ScrewEmbodiment(EmbodimentBase):
         self._last_vision_confidence = float(data["vision_confidence"])
         self._last_vision_xy_error = np.asarray(data["vision_xy_error_m"], dtype=float)
         self._last_screw_top_z_estimate = float(data["vision_screw_top_z_estimate_m"])
-        self._xy_alignment_locked = self._vision_xy_aligned(data)
+        self._xy_alignment_locked = self._vision_xy_aligned(
+            data, currently_locked=self._xy_alignment_locked
+        )
         self._force_proximity_latched = self._xy_alignment_locked
         if self._last_vision_confidence >= VISION_XY_MOTION_MIN_CONFIDENCE:
             self._last_screw_xy_estimate = np.asarray(
@@ -527,7 +546,9 @@ class UR20ScrewEmbodiment(EmbodimentBase):
         self._last_vision_confidence = float(data["vision_confidence"])
         self._last_vision_xy_error = np.asarray(data["vision_xy_error_m"], dtype=float)
         self._last_axial_contact = self._has_axial_contact(data)
-        self._xy_alignment_locked = self._vision_xy_aligned(data)
+        self._xy_alignment_locked = self._vision_xy_aligned(
+            data, currently_locked=self._xy_alignment_locked
+        )
         if self._last_vision_confidence >= VISION_XY_MOTION_MIN_CONFIDENCE:
             self._last_screw_xy_estimate = np.asarray(
                 data["vision_screw_xy_estimate_m"], dtype=float
@@ -544,6 +565,7 @@ class UR20ScrewEmbodiment(EmbodimentBase):
                 self._contact_seating_latched = True
             while (start_spiral_search
                    and self._contact_seating_latched
+                   and self._spiral_search_active
                    and not self._spiral_search_guarded
                    and not data.get("spiral_tactile_seated", False)
                    and self.environment_steps < self.max_steps):
@@ -560,7 +582,9 @@ class UR20ScrewEmbodiment(EmbodimentBase):
                     self._last_screw_xy_estimate = np.asarray(
                         data["vision_screw_xy_estimate_m"], dtype=float
                     )
-                self._xy_alignment_locked = self._vision_xy_aligned(data)
+                self._xy_alignment_locked = self._vision_xy_aligned(
+                    data, currently_locked=self._xy_alignment_locked
+                )
                 self._spiral_search_active = bool(data["spiral_search_state"][0])
                 self._spiral_search_guarded = bool(data["spiral_search_state"][2])
                 self._last_axial_contact = self._has_axial_contact(data)
@@ -689,10 +713,12 @@ class UR20ScrewEmbodiment(EmbodimentBase):
                                     requested_target, applied_target)})
 
     @staticmethod
-    def _vision_xy_aligned(data: dict[str, Any]) -> bool:
+    def _vision_xy_aligned(data: dict[str, Any], currently_locked: bool = False) -> bool:
         error = np.asarray(data["vision_xy_error_m"], dtype=float)
+        tolerance = (XY_ALIGNMENT_RELEASE_TOLERANCE_M if currently_locked
+                     else XY_ALIGNMENT_TOLERANCE_M)
         return (float(data["vision_confidence"]) >= VISION_XY_MOTION_MIN_CONFIDENCE
-                and np.linalg.norm(error) <= XY_ALIGNMENT_TOLERANCE_M)
+                and np.linalg.norm(error) <= tolerance)
 
     @staticmethod
     def _has_axial_contact(data: dict[str, Any]) -> bool:

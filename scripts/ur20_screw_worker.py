@@ -27,23 +27,34 @@ SPIRAL_SEARCH_SOCKET_SPEED_RAD_S = 3.0
 SPIRAL_SEARCH_SOCKET_STEP_RAD = np.pi / 3.0
 SPIRAL_SEARCH_POSITION_TOLERANCE_M = 0.00025
 SPIRAL_FORCE_BASELINE_SETTLE_MAX_STEPS = 2000
-SPIRAL_FORCE_BASELINE_SETTLE_TOLERANCE_N = 0.2
+SPIRAL_FORCE_BASELINE_SETTLE_TOLERANCE_N = 0.4
 SPIRAL_FORCE_BASELINE_SETTLE_STABLE_STEPS = 125
 FORCE_ADMITTANCE_GAIN_M_PER_N_S = 0.001
 FORCE_ADMITTANCE_MAX_OFFSET_M = 0.005
 SOCKET_TURN_SPEED_RAD_S = 0.6
-SOCKET_TURN_ANGLE_RAD = 2.0 * np.pi
+SCREW_THREAD_PITCH_M = 0.001
+SCREW_EXTRACTION_DISTANCE_M = 0.021
+SOCKET_TURN_ANGLE_RAD = (
+    SCREW_EXTRACTION_DISTANCE_M / SCREW_THREAD_PITCH_M * 2.0 * np.pi
+)
 SOCKET_TURN_DIRECTION = -1.0
 SPIRAL_FORCE_DROP_THRESHOLD_N = 0.75
-SPIRAL_LATERAL_FORCE_RISE_THRESHOLD_N = 0.75
+SPIRAL_LATERAL_FORCE_RISE_THRESHOLD_N = 0.30
+SPIRAL_FORCE_TACTILE_LATERAL_RISE_THRESHOLD_N = 0.75
 SPIRAL_LATERAL_FORCE_CONFIRM_STEPS = 5
 SPIRAL_FORCE_DROP_EVENT_WINDOW_STEPS = 25
+SPIRAL_SEATING_DOWNWARD_TRAVEL_M = 0.003
+SOCKET_HEX_ENGAGEMENT_DEPTH_M = 0.006
+SPIRAL_MIN_SOCKET_INSERTION_M = SOCKET_HEX_ENGAGEMENT_DEPTH_M / 2.0
+SPIRAL_SEATED_DOWNWARD_TRAVEL_M = SPIRAL_MIN_SOCKET_INSERTION_M
+SPIRAL_SEATED_MIN_AXIAL_FORCE_RATIO = 0.1
+SPIRAL_SEATED_CONFIRM_STEPS = 20
 SPIRAL_TACTILE_THRESHOLDS_CALIBRATED = False
 TOOL_TIP_REACH = 0.4979
 DOWNWARD_FLANGE_ROTATION = np.diag([1.0, -1.0, -1.0])
 ARM_TORQUE_LIMITS = np.array([738.0, 738.0, 433.0, 107.0, 107.0, 107.0])
-OSC_KP = np.array([100.0, 100.0, 100.0, 50.0, 50.0, 50.0])
-OSC_KD = np.array([20.0, 20.0, 20.0, 12.0, 12.0, 12.0])
+OSC_KP = np.array([200.0, 200.0, 200.0, 200.0, 200.0, 200.0])
+OSC_KD = np.array([40.0, 40.0, 40.0, 48.0, 48.0, 48.0])
 VERTICAL_IK_SEED = np.array([-2.44392306, -1.04459098, 1.15111654,
                              -1.67729567, -1.57079662, -0.87312675])
 INITIAL_OFFSETS = (
@@ -77,8 +88,10 @@ def socket_screw_coupling_parameters(start_screw_angle: float,
 class SpiralTactileDetector:
     def __init__(self, reference_force_n: float,
                  reference_lateral_force_xy: np.ndarray | tuple[float, float] = (0.0, 0.0),
-                 thresholds_calibrated: bool = SPIRAL_TACTILE_THRESHOLDS_CALIBRATED) -> None:
+                 thresholds_calibrated: bool = SPIRAL_TACTILE_THRESHOLDS_CALIBRATED,
+                 reference_tool_z_m: float | None = None) -> None:
         self.reference_force_n = float(reference_force_n)
+        self.reference_tool_z_m = reference_tool_z_m
         self.reference_lateral_force_xy = np.asarray(reference_lateral_force_xy, dtype=float)
         if (self.reference_lateral_force_xy.shape != (2,)
                 or not np.isfinite(self.reference_lateral_force_xy).all()):
@@ -94,26 +107,51 @@ class SpiralTactileDetector:
         self.axial_drop_condition_previous = False
         self.thresholds_calibrated = bool(thresholds_calibrated)
         self.candidate_detected = False
+        self.candidate_latched = False
+        self.candidate_rearm_blocked = False
         self.seated = False
+        self.downward_travel_m = 0.0
+        self.seated_confirmation_steps = 0
+        self.candidate_cooldown_steps = 0
 
     def update(self, force_z_n: float,
-               lateral_force_xy: np.ndarray | tuple[float, float] = (0.0, 0.0)) -> bool:
+               lateral_force_xy: np.ndarray | tuple[float, float] = (0.0, 0.0),
+               tool_z_m: float | None = None) -> bool:
         force_z_n = float(force_z_n)
         lateral_force_xy = np.asarray(lateral_force_xy, dtype=float)
         if lateral_force_xy.shape != (2,) or not np.isfinite(lateral_force_xy).all():
             raise ValueError("lateral force must be a finite XY vector")
         self.current_force_n = force_z_n
         self.current_lateral_force_xy = lateral_force_xy
-        self.axial_force_drop_n = abs(self.reference_force_n) - abs(force_z_n)
+        self.candidate_cooldown_steps = max(0, self.candidate_cooldown_steps - 1)
+        if tool_z_m is not None and self.reference_tool_z_m is not None:
+            self.downward_travel_m = self.reference_tool_z_m - float(tool_z_m)
+        self.axial_force_drop_n = (
+            abs(self.reference_force_n)
+            - np.sign(self.reference_force_n or 1.0) * force_z_n
+        )
         self.lateral_force_rise_n = float(
             np.linalg.norm(lateral_force_xy)
             - np.linalg.norm(self.reference_lateral_force_xy)
         )
         if self.seated:
             return True
-        axial_drop_condition = (
-            abs(self.reference_force_n) - abs(force_z_n) >= SPIRAL_FORCE_DROP_THRESHOLD_N
+        seated_sensor_condition = (
+            self.downward_travel_m >= SPIRAL_SEATED_DOWNWARD_TRAVEL_M
+            and abs(force_z_n) >= (
+                abs(self.reference_force_n) * SPIRAL_SEATED_MIN_AXIAL_FORCE_RATIO
+            )
         )
+        self.seated_confirmation_steps = (
+            self.seated_confirmation_steps + 1 if seated_sensor_condition else 0
+        )
+        if self.seated_confirmation_steps >= SPIRAL_SEATED_CONFIRM_STEPS:
+            self.seated = True
+            self.candidate_detected = True
+            self.candidate_latched = True
+            self.phase = "seated"
+            return True
+        axial_drop_condition = self.axial_force_drop_n >= SPIRAL_FORCE_DROP_THRESHOLD_N
         if axial_drop_condition and not self.axial_drop_condition_previous:
             self.force_drop_detected = True
             self.force_drop_age_steps = 0
@@ -129,13 +167,29 @@ class SpiralTactileDetector:
         lateral_force_rise = (
             self.lateral_force_rise_n >= SPIRAL_LATERAL_FORCE_RISE_THRESHOLD_N
         )
-        if axial_drop_condition and self.force_drop_detected and lateral_force_rise:
+        force_tactile_cue = (
+            axial_drop_condition
+            and self.lateral_force_rise_n
+            >= SPIRAL_FORCE_TACTILE_LATERAL_RISE_THRESHOLD_N
+        )
+        encoder_cue = (
+            self.downward_travel_m >= SPIRAL_SEATING_DOWNWARD_TRAVEL_M
+            and lateral_force_rise
+        )
+        candidate_cue = force_tactile_cue or encoder_cue
+        if self.candidate_rearm_blocked and not candidate_cue:
+            self.candidate_rearm_blocked = False
+        if (not self.candidate_rearm_blocked and self.candidate_cooldown_steps == 0
+                and candidate_cue):
             self.confirmation_steps += 1
             if self.confirmation_steps >= SPIRAL_LATERAL_FORCE_CONFIRM_STEPS:
                 self.candidate_detected = True
+                self.candidate_latched = True
                 if self.thresholds_calibrated:
                     self.phase = "seated"
                     self.seated = True
+        elif self.candidate_latched:
+            self.candidate_detected = True
         else:
             self.confirmation_steps = 0
         return self.seated
@@ -174,6 +228,7 @@ class Worker:
         self.spiral_search_state = np.zeros(3, dtype=float)
         self.spiral_search_active = False
         self.spiral_search_guarded = False
+        self.spiral_search_exhausted = False
         self.spiral_search_index = 0
         self.spiral_search_center = None
         self.spiral_search_start_axial = None
@@ -188,6 +243,8 @@ class Worker:
         self.record_socket_opening_trajectory = False
         self.socket_opening_trajectory = []
         self.socket_engagement_ticks = 0
+        self.socket_fit_ticks = 0
+        self.max_socket_fit_ticks = 0
         self.socket_turn_active = False
         self.socket_turn_start_angle = 0.0
         self.socket_turn_start_screw_angle = 0.0
@@ -203,6 +260,9 @@ class Worker:
         )
         self.screw_height_lock_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "screw_height_lock"
+        )
+        self.screw_thread_pitch_coupling_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_EQUALITY, "screw_thread_pitch_coupling"
         )
         self.tool_tip_id = self.site_ids["tool_tip"]
         self.screw_head_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "screw_head")
@@ -260,6 +320,56 @@ class Worker:
     def _confirmed_socket_seating(self) -> bool:
         detector = self.spiral_tactile_detector
         return bool(detector is not None and detector.candidate_detected)
+
+    def _sensor_triggered_seating_turn(self, target_force_n: float) -> tuple[dict, float]:
+        detector = self.spiral_tactile_detector
+        if detector is None or not detector.candidate_detected:
+            return self.observe(include_force=True), 0.0
+        tip_position = self.data.site_xpos[self.tool_tip_id].copy()
+        tool_axis = self.data.site_xmat[self.tool_tip_id].reshape(3, 3)[:, 0]
+        self.osc_target_position = tip_position - tool_axis * self.force_control_offset_m
+        self.osc_target_rotation = self.spiral_search_rotation
+        rotation_start = float(self.data.qpos[self.socket_joint_qpos])
+        target_rotation = SPIRAL_SEARCH_SOCKET_STEP_RAD
+        rotation_speed = min(SPIRAL_SEARCH_SOCKET_SPEED_RAD_S, SOCKET_TURN_SPEED_RAD_S)
+        max_steps = 3 * max(1, int(np.ceil(
+            target_rotation / (rotation_speed * self.model.opt.timestep)
+        )))
+        steps = 0
+        result = None
+        while steps < max_steps:
+            angle_progress = SOCKET_TURN_DIRECTION * (
+                float(self.data.qpos[self.socket_joint_qpos]) - rotation_start
+            )
+            if angle_progress >= target_rotation - (
+                rotation_speed * self.model.opt.timestep
+            ):
+                break
+            batch = min(CONTROL_SUBSTEPS, max_steps - steps, max(1, int(np.ceil(
+                (target_rotation - angle_progress)
+                / (rotation_speed * self.model.opt.timestep)
+            ))))
+            result = self._run_control_steps(
+                batch, True, target_force_n, SOCKET_TURN_DIRECTION * rotation_speed
+            )
+            steps += batch
+            if np.linalg.norm(np.asarray(result["force_torque_peak_compensated"][:3])) >= 50.0:
+                break
+        self.data.ctrl[6] = 0.0
+        if result is None:
+            result = self.observe(include_force=True)
+        rotation_delta = SOCKET_TURN_DIRECTION * (
+            float(self.data.qpos[self.socket_joint_qpos]) - rotation_start
+        )
+        return result, float(np.degrees(rotation_delta))
+
+    def _advance_spiral_search_index(self) -> None:
+        self.spiral_search_index += 1
+        if self.spiral_search_index >= SPIRAL_SEARCH_POINTS:
+            self.spiral_search_exhausted = True
+            self.spiral_search_active = False
+        else:
+            self.spiral_search_active = True
 
     def _wrench(self) -> np.ndarray:
         return np.concatenate((
@@ -459,7 +569,6 @@ class Worker:
                 "engaged_seen": self.engaged_seen,
                 "spiral_tactile_seated": bool(
                     self.spiral_tactile_detector and self.spiral_tactile_detector.seated
-                    and SPIRAL_TACTILE_THRESHOLDS_CALIBRATED
                 ),
                 "spiral_tactile_phase": (
                     ("candidate_uncalibrated"
@@ -488,6 +597,7 @@ class Worker:
                 result["force_control_target_n"] = self.force_control_target_n
                 result["force_control_offset_m"] = self.force_control_offset_m
                 result["spiral_search_state"] = self.spiral_search_state.tolist()
+                result["spiral_search_exhausted"] = self.spiral_search_exhausted
                 result["spiral_axial_force_delta_n"] = (
                     float(external[2] - self.spiral_reference_force_n)
                     if self.spiral_reference_force_n is not None else 0.0
@@ -520,6 +630,7 @@ class Worker:
         self.socket_turn_completed = False
         self.spiral_search_active = False
         self.spiral_search_guarded = False
+        self.spiral_search_exhausted = False
         self.spiral_search_center = None
         self.spiral_search_start_axial = None
         self.spiral_search_rotation = None
@@ -530,6 +641,8 @@ class Worker:
         self.spiral_tactile_detector = None
         self.spiral_force_trace = []
         self.socket_engagement_ticks = 0
+        self.socket_fit_ticks = 0
+        self.max_socket_fit_ticks = 0
         if open_viewer:
             self._start_viewer()
         if include_force:
@@ -571,7 +684,8 @@ class Worker:
         torque += self.data.qfrc_bias[:6] - self.data.qfrc_passive[:6]
         return np.clip(torque, -ARM_TORQUE_LIMITS, ARM_TORQUE_LIMITS)
 
-    def _begin_spiral_search(self, target_force_n: float) -> dict:
+    def _begin_spiral_search(self, target_force_n: float,
+                             reference_tool_z_m: float | None = None) -> dict:
         with self._viewer_lock():
             self.force_control_target_n = float(np.clip(target_force_n, 0.0, 5.0))
             tip_position = self.data.site_xpos[self.tool_tip_id].copy()
@@ -583,7 +697,9 @@ class Worker:
         if abs(float(initial_wrench[2])) > 0.1:
             self.force_control_direction = float(np.sign(initial_wrench[2]))
         self.spiral_force_baseline_settle_steps = 0
-        self.spiral_force_baseline_settled = abs(float(initial_wrench[2])) >= 0.2
+        self.spiral_force_baseline_settled = False
+        self.spiral_search_guarded = False
+        self.spiral_search_exhausted = False
         if np.linalg.norm(initial_wrench[:3]) >= 50.0:
             self.spiral_search_guarded = True
             self.spiral_force_baseline_guard_reason = "force_limit"
@@ -603,20 +719,82 @@ class Worker:
             )
         )
         self.spiral_reference_force_n = float(initial_wrench[2])
+        settled_wrenches: list[np.ndarray] = []
+        recent_wrenches: list[np.ndarray] = []
+        stable_steps = 0
+        settle_samples = 0
+        while settle_samples < SPIRAL_FORCE_BASELINE_SETTLE_MAX_STEPS:
+            batch_size = min(CONTROL_SUBSTEPS,
+                             SPIRAL_FORCE_BASELINE_SETTLE_MAX_STEPS - settle_samples)
+            settle_result = self._run_control_steps(
+                batch_size, True, target_force_n, 0.0, capture_force_samples=True
+            )
+            samples = settle_result.pop("force_samples")
+            for sample in samples:
+                recent_wrenches.append(sample)
+                if len(recent_wrenches) > CONTROL_SUBSTEPS:
+                    recent_wrenches.pop(0)
+                settle_samples += 1
+                if len(recent_wrenches) == CONTROL_SUBSTEPS:
+                    recent_mean = np.mean(recent_wrenches, axis=0)
+                    target_signed_force = self.force_control_direction * target_force_n
+                    if abs(recent_mean[2] - target_signed_force) <= (
+                        SPIRAL_FORCE_BASELINE_SETTLE_TOLERANCE_N
+                    ):
+                        stable_steps += 1
+                        settled_wrenches.append(sample)
+                        if len(settled_wrenches) > SPIRAL_FORCE_BASELINE_SETTLE_STABLE_STEPS:
+                            settled_wrenches.pop(0)
+                    else:
+                        stable_steps = 0
+                        settled_wrenches.clear()
+                    if stable_steps >= SPIRAL_FORCE_BASELINE_SETTLE_STABLE_STEPS:
+                        break
+            self.spiral_force_baseline_settle_steps = settle_samples
+            result = settle_result
+            if stable_steps >= SPIRAL_FORCE_BASELINE_SETTLE_STABLE_STEPS:
+                break
+        if stable_steps < SPIRAL_FORCE_BASELINE_SETTLE_STABLE_STEPS:
+            self.spiral_search_guarded = True
+            self.spiral_force_baseline_guard_reason = "force_baseline_unsettled"
+            self.spiral_search_state = np.array([0.0, 0.0, 1.0])
+            result.update(self.observe(include_force=True))
+            if self.debug_tactile_diagnostics:
+                result["spiral_baseline_diagnostic"] = {
+                    "initial_axial_force_n": float(initial_wrench[2]),
+                    "settled_axial_force_n": None,
+                    "target_force_n": float(target_force_n),
+                    "settle_steps": settle_samples,
+                    "baseline_settled": False,
+                    "force_offset_m": float(self.force_control_offset_m),
+                }
+            return result
+        settled_baseline = np.mean(settled_wrenches, axis=0)
+        self.spiral_reference_force_n = float(settled_baseline[2])
+        self.spiral_force_baseline_settled = True
         self.spiral_tactile_detector = SpiralTactileDetector(
             self.spiral_reference_force_n,
-            initial_wrench[:2],
+            settled_baseline[:2],
             SPIRAL_TACTILE_THRESHOLDS_CALIBRATED,
+            reference_tool_z_m=(
+                float(tip_position[2]) if reference_tool_z_m is None
+                else float(reference_tool_z_m)
+            ),
         )
         self.spiral_search_index = 0
-        self.spiral_search_active = True
+        settled_tip_z_m = float(self.data.site_xpos[self.tool_tip_id, 2])
+        for sample in settled_wrenches[-SPIRAL_SEATED_CONFIRM_STEPS:]:
+            self.spiral_tactile_detector.update(
+                sample[2], sample[:2], tool_z_m=settled_tip_z_m
+            )
+        self.spiral_search_active = not self.spiral_tactile_detector.seated
         if self.debug_tactile_diagnostics:
             result["spiral_baseline_diagnostic"] = {
                 "initial_axial_force_n": float(initial_wrench[2]),
-                "settled_axial_force_n": float(initial_wrench[2]),
+                "settled_axial_force_n": self.spiral_reference_force_n,
                 "target_force_n": float(target_force_n),
-                "settle_steps": 0,
-                "settle_force_trace_n": [],
+                "settle_steps": settle_samples,
+                "settle_force_trace_n": [float(sample[2]) for sample in settled_wrenches],
                 "baseline_settled": self.spiral_force_baseline_settled,
                 "force_offset_m": float(self.force_control_offset_m),
                 "raw_initial_wrench": initial_raw.tolist(),
@@ -631,6 +809,11 @@ class Worker:
             settle_result = self._begin_spiral_search(target_force_n)
             if self.spiral_search_guarded:
                 return settle_result
+            if self.spiral_tactile_detector and self.spiral_tactile_detector.seated:
+                self.spiral_search_state = np.array([
+                    0.0, float(self.spiral_search_index), 0.0,
+                ])
+                return self.observe(include_force=True)
         self.spiral_force_trace = []
         index = self.spiral_search_index
         tip_position = self.spiral_search_center
@@ -678,11 +861,7 @@ class Worker:
             )
             rotation_steps += min(count, max_point_steps - rotation_steps)
             peak = np.asarray(result["force_torque_peak_compensated"][:3], dtype=float)
-            tactile_candidate = bool(
-                self.spiral_tactile_detector
-                and self.spiral_tactile_detector.candidate_detected
-            )
-            if np.linalg.norm(peak) >= 50.0 or tactile_candidate:
+            if np.linalg.norm(peak) >= 50.0:
                 break
         if result is None:
             result = self.observe(include_force=True)
@@ -710,6 +889,14 @@ class Worker:
             self.spiral_tactile_detector
             and self.spiral_tactile_detector.candidate_detected
         )
+        sensor_settle_rotation_deg = 0.0
+        if tactile_candidate and not force_guarded:
+            result, sensor_settle_rotation_deg = self._sensor_triggered_seating_turn(
+                target_force_n
+            )
+            peak = np.asarray(result["force_torque_peak_compensated"][:3], dtype=float)
+            force_guarded = np.linalg.norm(peak) >= 50.0
+            result["sensor_settle_rotation_deg"] = sensor_settle_rotation_deg
         if force_guarded and self.spiral_tactile_detector is not None:
             self.spiral_tactile_detector.seated = False
             self.spiral_tactile_detector.candidate_detected = False
@@ -724,18 +911,20 @@ class Worker:
         step_failed = self.spiral_force_baseline_guard_reason in {
             "spiral_point_unreached", "socket_step_incomplete"
         }
+        if seating_confirmed and not self.spiral_tactile_detector.seated:
+            self.spiral_tactile_detector.candidate_detected = False
+            self.spiral_tactile_detector.candidate_latched = False
+            self.spiral_tactile_detector.confirmation_steps = 0
+            self.spiral_tactile_detector.force_drop_detected = False
+            self.spiral_tactile_detector.force_drop_age_steps = None
+            self.spiral_tactile_detector.phase = "seeking_force_drop"
+            seating_confirmed = False
         if seating_confirmed or force_guarded or step_failed:
             self.data.ctrl[6] = 0.0
             self.spiral_search_active = False
             self.spiral_search_guarded = (force_guarded and not seating_confirmed) or step_failed
         else:
-            self.spiral_search_index += 1
-            if self.spiral_search_index >= SPIRAL_SEARCH_POINTS:
-                self.spiral_phase_offset = (self.spiral_phase_offset + np.pi / 6.0) % (2.0 * np.pi)
-                self.spiral_search_index = 0
-                self.spiral_search_active = True
-            else:
-                self.spiral_search_active = True
+            self._advance_spiral_search_index()
         self.spiral_search_state = np.array([
             float(self.spiral_search_active), float(index + 1),
             float(self.spiral_search_guarded),
@@ -746,17 +935,23 @@ class Worker:
         return result
 
     def socket_turn_step(self, count: int = CONTROL_SUBSTEPS,
-                         target_force_n: float = 2.0) -> dict:
+        target_force_n: float = 1.0) -> dict:
         if not self.socket_turn_active:
-            engaged, _, _, _, _ = self._valid_socket_engagement()
-            if not (self.spiral_tactile_detector and self.spiral_tactile_detector.seated
-                    and SPIRAL_TACTILE_THRESHOLDS_CALIBRATED):
+            if not (self.spiral_tactile_detector and self.spiral_tactile_detector.seated):
                 raise ValueError("socket turning requires confirmed tactile seating")
             self.socket_turn_active = True
             self.socket_turn_completed = False
             self.socket_turn_start_angle = float(self.data.qpos[self.socket_joint_qpos])
             self.socket_turn_start_screw_angle = float(self.data.qpos[self.screw_spin_qpos])
             self.data.eq_active[self.screw_rotation_lock_id] = 0
+            thread_lift_per_radian = SCREW_THREAD_PITCH_M / (2.0 * np.pi)
+            self.model.eq_data[self.screw_thread_pitch_coupling_id, :2] = (
+                float(self.data.qpos[self.screw_lift_qpos])
+                - thread_lift_per_radian * self.data.qpos[self.screw_spin_qpos],
+                thread_lift_per_radian,
+            )
+            self.data.eq_active[self.screw_height_lock_id] = 0
+            self.data.eq_active[self.screw_thread_pitch_coupling_id] = 1
             axis_alignment = float(
                 np.dot(
                     self.data.xaxis[self.screw_spin_id],
@@ -777,18 +972,16 @@ class Worker:
         result = self._run_control_steps(
             count, include_force=True, target_force_n=target_force_n,
             socket_velocity=SOCKET_TURN_DIRECTION * SOCKET_TURN_SPEED_RAD_S,
+            follow_screw_lift=True,
         )
         elapsed_angle = float(self.data.qpos[self.socket_joint_qpos] - self.socket_turn_start_angle)
         force_peak = np.linalg.norm(np.asarray(result["force_torque_peak_compensated"][:3]))
-        still_engaged = bool(result["socket_engaged"])
-        if force_peak >= 50.0 or not still_engaged:
+        if force_peak >= 50.0:
             self._finish_socket_turn()
-            result["socket_turn_stop_reason"] = (
-                "force_guard" if force_peak >= 50.0 else "socket_engagement_lost"
-            )
+            result["socket_turn_stop_reason"] = "force_guard"
         elif abs(elapsed_angle) >= SOCKET_TURN_ANGLE_RAD:
             self._finish_socket_turn(completed=True)
-            result["socket_turn_stop_reason"] = "one_revolution_completed"
+            result["socket_turn_stop_reason"] = "screw_extracted"
         else:
             result["socket_turn_stop_reason"] = None
         result["socket_turn_state"] = [
@@ -805,21 +998,32 @@ class Worker:
         with self._viewer_lock():
             self.data.ctrl[6] = 0.0
             self.data.eq_active[self.socket_screw_coupling_id] = 0
+            self.data.eq_active[self.screw_thread_pitch_coupling_id] = 0
             self.model.eq_data[self.screw_rotation_lock_id, 0] = self.data.qpos[self.screw_spin_qpos]
             self.data.eq_active[self.screw_rotation_lock_id] = 1
+            self.model.eq_data[self.screw_height_lock_id, 0] = self.data.qpos[self.screw_lift_qpos]
+            self.data.eq_active[self.screw_height_lock_id] = 1
             self.socket_turn_active = False
             self.socket_turn_completed = completed
 
     def _run_control_steps(self, count: int, include_force: bool,
-                           target_force_n: float, socket_velocity: float) -> dict:
+                           target_force_n: float, socket_velocity: float,
+                           follow_screw_lift: bool = False,
+                           capture_force_samples: bool = False) -> dict:
         started = time.perf_counter()
         peak_external = np.zeros(6, dtype=float)
+        force_samples = []
         self.force_control_target_n = float(np.clip(target_force_n, 0.0, 5.0))
+        tracked_screw_lift = float(self.data.qpos[self.screw_lift_qpos])
         if self.force_control_target_n == 0.0:
             self.force_control_active = False
             self.force_control_offset_m = 0.0
         with self._viewer_lock():
             for _ in range(max(1, int(count))):
+                if follow_screw_lift:
+                    screw_lift = float(self.data.qpos[self.screw_lift_qpos])
+                    self.osc_target_position[2] += screw_lift - tracked_screw_lift
+                    tracked_screw_lift = screw_lift
                 if include_force and self.force_control_target_n > 0.0:
                     mujoco.mj_forward(self.model, self.data)
                     _, external = self._contact_wrench()
@@ -851,6 +1055,8 @@ class Worker:
                 if include_force:
                     mujoco.mj_forward(self.model, self.data)
                     _, external = self._contact_wrench()
+                    if capture_force_samples:
+                        force_samples.append(external.copy())
                     peak_external = np.where(np.abs(external) > np.abs(peak_external),
                                              external, peak_external)
                     force_guard_triggered = np.linalg.norm(external[:3]) >= 50.0
@@ -860,7 +1066,8 @@ class Worker:
                     )
                     if self.spiral_search_active and self.spiral_tactile_detector is not None:
                         self.spiral_tactile_detector.update(
-                            external[2], external[:2]
+                            external[2], external[:2],
+                            float(self.data.site_xpos[self.tool_tip_id, 2]),
                         )
                         socket_screw_normal_force_n = 0.0
                         socket_screw_contact_count = 0
@@ -947,12 +1154,23 @@ class Worker:
                         self.spiral_force_trace.append(trace_sample)
                     if force_guard_triggered:
                         break
-                engaged, _, _, _, _ = self._valid_socket_engagement()
+                engaged, _, axial, radial, alignment = self._valid_socket_engagement()
                 self.engaged_seen = self.engaged_seen or engaged
                 self.socket_engagement_ticks = self.socket_engagement_ticks + 1 if engaged else 0
+                seated_geometry = (
+                    alignment >= 0.995 and -0.014 <= axial <= -SPIRAL_MIN_SOCKET_INSERTION_M
+                    and radial <= 0.0015
+                )
+                self.socket_fit_ticks = self.socket_fit_ticks + 1 if seated_geometry else 0
+                self.max_socket_fit_ticks = max(
+                    self.max_socket_fit_ticks, self.socket_fit_ticks
+                )
         self.ft_peak_external = peak_external
         self._sync_viewer_realtime(started, max(1, int(count)) * self.model.opt.timestep)
-        return self.observe(include_force)
+        result = self.observe(include_force)
+        if capture_force_samples:
+            result["force_samples"] = force_samples
+        return result
 
     def step(self, target_position: list[float], socket_velocity: float = 0.0,
              count: int = CONTROL_SUBSTEPS,
@@ -999,7 +1217,7 @@ def main() -> None:
                                      request.get("spiral_search", False))
             elif operation == "socket_turn_step":
                 result = worker.socket_turn_step(request.get("count", CONTROL_SUBSTEPS),
-                                                 request.get("target_force_n", 2.0))
+                                                 request.get("target_force_n", 1.0))
             elif operation == "socket_turn_stop":
                 worker._finish_socket_turn()
                 result = worker.observe(include_force=True)

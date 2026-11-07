@@ -97,7 +97,7 @@ def wire_for(model, base_url=None):
 
 
 class BudgetTransport(httpx.BaseTransport):
-    def __init__(self, output, total_budget, episode_budget=3., inner=None, task_id=0, demo_manifest=None, max_calls=80, model='openai/gpt-6-astra', image_horizon=2, max_output_tokens=8192, base_url=None, endpoint_base_url=None):
+    def __init__(self, output, total_budget, episode_budget=3., inner=None, task_id=0, demo_manifest=None, max_calls=80, model='openai/gpt-6-astra', image_horizon=2, images_per_observation=2, max_output_tokens=8192, base_url=None, endpoint_base_url=None):
         if not isinstance(max_output_tokens, int) or not 1 <= max_output_tokens <= 128000:
             raise ValueError("max_output_tokens must be an integer in 1..128000")
         self.max_output_tokens=max_output_tokens
@@ -105,8 +105,9 @@ class BudgetTransport(httpx.BaseTransport):
         self.output.mkdir(parents=True, exist_ok=True)
         self.task_id=task_id
         self.max_calls=max_calls
-        # Two cameras per kept observation; None keeps the full image history.
-        self.max_live_images=None if image_horizon is None else 2*image_horizon
+        # None keeps the full image history.
+        self.max_live_images=(None if image_horizon is None
+                              else images_per_observation*image_horizon)
         self.wire=wire_for(model,base_url=base_url)
         self.model=model
         self.base_url=base_url.rstrip('/') if base_url else None

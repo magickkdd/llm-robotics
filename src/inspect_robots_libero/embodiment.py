@@ -33,6 +33,11 @@ from inspect_robots.spaces import (
 from inspect_robots.types import Action, Observation, StepResult
 
 from inspect_robots_libero.notes import TASK_NOTES
+from inspect_robots_libero.panda_control import (
+    PANDA_COMPLIANT_AXIS_STEP_M,
+    PANDA_POSITION_BOUNDS_M,
+)
+from inspect_robots_libero.spiral import SPIRAL_POINTS, SPIRAL_MAX_RADIUS_M
 from inspect_robots_libero.tasks import ENV_SEED_BASE, check_object_task_id, check_task_id
 
 CONTROL_HZ = 20
@@ -77,22 +82,22 @@ BASE_DOCS = (
 )
 
 
-def _action_space() -> Box:
+def _action_space(compliant_axis: str | None = None) -> Box:
     """Absolute end-effector pose (xyz + rot6d) plus a continuous gripper command."""
+    max_step = np.array([0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.1])
+    if compliant_axis is not None:
+        max_step[("x", "y", "z").index(compliant_axis)] = PANDA_COMPLIANT_AXIS_STEP_M
     return Box(
         shape=(10,),
-        # Living-room tables sit at z=0.41, where the fingertips touch the table with the
-        # end effector at about 0.45; the floor stays just below that so flat objects are
-        # reachable without letting targets drive hard into the table.
-        low=np.array([-0.6, -0.6, 0.42, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 0.0]),
-        high=np.array([0.6, 0.6, 1.6, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]),
+        low=np.concatenate((PANDA_POSITION_BOUNDS_M[:, 0], np.full(6, -1.0), [0.0])),
+        high=np.concatenate((PANDA_POSITION_BOUNDS_M[:, 1], np.ones(6), [1.0])),
         semantics=ActionSemantics(
             control_mode="eef_abs_pose",
             rotation_repr="rot6d",
             gripper="continuous",
             frame="world",
             dim_labels=("x", "y", "z", "r00", "r10", "r20", "r01", "r11", "r21", "gripper"),
-            max_step=(0.01, 0.01, 0.01, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.1),
+            max_step=tuple(max_step.tolist()),
         ),
     )
 
@@ -127,6 +132,7 @@ class LiberoEmbodiment(EmbodimentBase):
         compliant_target_force_n: float = -2.0,
         compliant_contact_threshold_n: float = 1.0,
         compliant_gain_m_per_n: float = 0.0003,
+        spiral_search: bool = False,
     ) -> None:
         if suite not in ("libero_10", "libero_object", "libero_spatial", "libero_goal", "libero_90"):
             raise ConfigError(f"unsupported LIBERO suite {suite!r}")
@@ -146,6 +152,8 @@ class LiberoEmbodiment(EmbodimentBase):
         self.vision_assist = vision_assist
         if compliant_control and not force_feedback:
             raise ConfigError("compliant_control=True requires force_feedback=True")
+        if spiral_search and (not force_feedback or not compliant_control):
+            raise ConfigError("spiral_search requires force_feedback and compliant_control")
         if compliant_axis not in ("x", "y", "z"):
             raise ConfigError("compliant_axis must be x, y, or z")
         self.compliant_control = compliant_control
@@ -153,6 +161,8 @@ class LiberoEmbodiment(EmbodimentBase):
         self.compliant_target_force_n = compliant_target_force_n
         self.compliant_contact_threshold_n = compliant_contact_threshold_n
         self.compliant_gain_m_per_n = compliant_gain_m_per_n
+        self.spiral_search = spiral_search
+        self.spiral_search_started = False
         if task_notes and self.task_id is None:
             raise ConfigError("task_notes=True needs an explicit task_id.\nfix: add -E task_id=N")
         docs = BASE_DOCS
@@ -192,6 +202,19 @@ class LiberoEmbodiment(EmbodimentBase):
                 "Panda-specific outer-loop pose correction, not direct torque "
                 "control."
             )
+        if spiral_search:
+            docs += (
+                "\n\nAn atomic force-compliant spiral_search tool is enabled. Call it only "
+                "after visual contact with the target. It runs one bounded spiral "
+                f"({SPIRAL_POINTS} small XY increments over {SPIRAL_MAX_RADIUS_M * 1000:g} mm, "
+                "repeated four times) "
+                "without intermediate model calls, holding the current orientation "
+                "and using the configured Z-axis force compliance. Seating is judged "
+                "only from wrist force and measured end-effector travel; no object "
+                "geometry or simulator target coordinates are read. The LIBERO Panda "
+                "has no independently rotating socket, so hex-phase rotation is not "
+                "actuated."
+            )
         if task_notes and self.task_id in TASK_NOTES:
             docs += "\n\n" + TASK_NOTES[self.task_id]
         name = suite if self.task_id is None else f"{suite}_task{self.task_id:02d}"
@@ -199,8 +222,11 @@ class LiberoEmbodiment(EmbodimentBase):
             name=name,
             is_simulated=True,
             control_hz=CONTROL_HZ,
-            capabilities=frozenset({"seedable", "resettable", "privileged_success", "renderable"}),
-            action_space=_action_space(),
+            capabilities=frozenset(
+                {"seedable", "resettable", "privileged_success", "renderable"}
+                | ({"atomic_spiral_search"} if spiral_search else set())
+            ),
+            action_space=_action_space(compliant_axis if compliant_control else None),
             observation_space=ObservationSpace(
                 cameras=tuple(CameraSpec(k, 256, 256) for k in ("agentview", "wrist")),
                 state=StateSpec(
@@ -218,6 +244,10 @@ class LiberoEmbodiment(EmbodimentBase):
                             StateField("compliance_target_force_n", (1,), "N"),
                             StateField("compliance_state", (2,))]
                            if compliant_control else [])
+                        + ([StateField("spiral_search_state", (3,)),
+                            StateField("spiral_tactile_state", (2,)),
+                            StateField("spiral_search_exhausted", (1,))]
+                           if spiral_search else [])
                     )
                 ),
             ),
@@ -268,6 +298,12 @@ class LiberoEmbodiment(EmbodimentBase):
                 float(data.get("compliance_engaged", False)),
                 float(data.get("compliance_ramp_step", 0)),
             ], dtype=float)
+        if self.spiral_search:
+            state["spiral_search_state"] = np.asarray(data["spiral_search_state"], dtype=float)
+            state["spiral_tactile_state"] = np.asarray(data["spiral_tactile_state"], dtype=float)
+            state["spiral_search_exhausted"] = np.asarray(
+                [float(data.get("spiral_search_exhausted", False))], dtype=float
+            )
         return Observation(
             images=images,
             state=state,
@@ -304,6 +340,7 @@ class LiberoEmbodiment(EmbodimentBase):
 
     def reset(self, scene: Scene, *, seed: int | None = None) -> Observation:
         """Load the scene's LIBERO task and init state, settle 10 steps, start a video."""
+        self.spiral_search_started = False
         meta = scene.metadata or {}
         suite = meta.get("libero_suite", self.suite)
         if suite != self.suite:
@@ -341,6 +378,7 @@ class LiberoEmbodiment(EmbodimentBase):
                 "compliant_target_force_n": self.compliant_target_force_n,
                 "compliant_contact_threshold_n": self.compliant_contact_threshold_n,
                 "compliant_gain_m_per_n": self.compliant_gain_m_per_n,
+                "spiral_search": self.spiral_search,
             }
         )
         self.instruction = data["instruction"]
@@ -348,11 +386,21 @@ class LiberoEmbodiment(EmbodimentBase):
 
     def step(self, action: Action) -> StepResult:
         """Execute one 20 Hz absolute-pose action; terminate on LIBERO success."""
-        data = self._rpc({
-            "op": "step",
-            "action": np.asarray(action.data).tolist(),
-            "visual_target_index": action.meta.get("visual_target_index"),
-        })
+        if action.meta.get("libero_spiral_search"):
+            if not self.spiral_search:
+                raise EmbodimentFault("spiral_search was not enabled for this rollout")
+            if self.spiral_search_started:
+                raise EmbodimentFault("spiral_search can only be called once per episode")
+            if self.last is None or not self.last.get("compliance_engaged", False):
+                raise EmbodimentFault("spiral_search requires force-detected axial contact")
+            self.spiral_search_started = True
+            data = self._rpc({"op": "spiral_search"})
+        else:
+            data = self._rpc({
+                "op": "step",
+                "action": np.asarray(action.data).tolist(),
+                "visual_target_index": action.meta.get("visual_target_index"),
+            })
         success = bool(data["success"])
         return StepResult(
             self._observation(data),

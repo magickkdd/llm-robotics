@@ -161,6 +161,7 @@
     <joint name="screw_rotation_lock" joint1="screw_spin" polycoef="0 0 0 0 0" solref="0.002 1" />
     <joint name="socket_screw_rotation_coupling" joint1="screw_spin" joint2="socket_joint" polycoef="0 -1 0 0 0" active="false" solref="0.002 1" />
     <joint name="screw_height_lock" joint1="screw_lift" polycoef="0 0 0 0 0" solref="0.002 1" />
+    <joint name="screw_thread_pitch_coupling" joint1="screw_lift" joint2="screw_spin" polycoef="0 0 0 0 0" active="false" solref="0.002 1" />
   </equality>
   <contact>
     <exclude body1="battery" body2="screw_m6" />

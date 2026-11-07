@@ -381,6 +381,12 @@ embodiment and policy as the CLI, with these additions:
   Cartesian admittance after contact force is observed. It is a small signed
   force correction on one selected world axis, not direct torque control; its
   force target, threshold, and gain can be configured independently of UR20.
+- `--spiral-search` exposes one blocking `spiral_search` Agent tool. It requires
+  force feedback, compliant control and world-Z compliance, and performs a
+  bounded 4 mm XY spiral with sensor/position-based seating feedback. LIBERO's
+  Panda has no independently rotating socket, and the standard LIBERO task
+  suites contain no screw/socket insertion task; this option validates the
+  transferable search/control interface, not a complete hex-socket operation.
 
 The paid runner accepts the native `libero_spatial`, `libero_object`,
 `libero_goal`, `libero_10`, and `libero_90` suites. Task ids use each suite's
@@ -413,6 +419,12 @@ contact threshold, and a 0.3 mm/(N·step) correction gain with a 0.3 mm
 per-step correction cap. After contact is detected, compliance stays engaged
 while the requested motion continues along the force axis and releases when
 the model requests motion in the opposite direction.
+
+To expose the atomic search tool on a compatible insertion scene, add
+`--spiral-search` and use a light signed world-Z setpoint, for example:
+`--force-feedback --compliant-control --compliant-axis z --compliant-target-force-n -1 --spiral-search`.
+The model calls `spiral_search` once after the configured contact threshold is
+reached; the policy does not issue intermediate LLM requests during the sweep.
 
 For example, a DeepSeek run uses `--model openai/deepseek-v4.1-flash-1017
 --profile deepseek`; a Luna run uses `--model openai/gpt-6-luna --profile luna`.

@@ -203,12 +203,18 @@ def main() -> None:
         "model": "MuJoCo UR20 screw station; no LLM calls",
         "state_id": args.state_id,
         "start_offset_mm": [args.start_offset_x_mm, args.start_offset_y_mm],
+        "screw_angle_deg": args.screw_angle_deg,
         "max_radius_mm": args.max_radius_mm,
         "max_points": args.max_points,
         "mode": args.mode,
         "socket_speed_rad_s": args.socket_speed_rad_s,
         "target_force_n": args.target_force_n,
         "approach_force_n": args.approach_force_n,
+        "seating_downward_travel_m": WORKER_MODULE.SPIRAL_SEATING_DOWNWARD_TRAVEL_M,
+        "seated_downward_travel_m": WORKER_MODULE.SPIRAL_SEATED_DOWNWARD_TRAVEL_M,
+        "socket_hex_engagement_depth_m": WORKER_MODULE.SOCKET_HEX_ENGAGEMENT_DEPTH_M,
+        "minimum_socket_insertion_m": WORKER_MODULE.SPIRAL_MIN_SOCKET_INSERTION_M,
+        "seated_min_axial_force_ratio": WORKER_MODULE.SPIRAL_SEATED_MIN_AXIAL_FORCE_RATIO,
         "force_offset_limit_mm": WORKER_MODULE.FORCE_ADMITTANCE_MAX_OFFSET_M * 1000.0,
         "search_points_per_turn": WORKER_MODULE.SPIRAL_SEARCH_POINTS
             / WORKER_MODULE.SPIRAL_SEARCH_TURNS,
@@ -269,7 +275,9 @@ def main() -> None:
                 "socket_engagement": worker._valid_socket_engagement(),
             })
             initial_raw, initial_wrench = worker._contact_wrench()
-            result = worker._begin_spiral_search(args.target_force_n)
+            result = worker._begin_spiral_search(
+                args.target_force_n, reference_tool_z_m=float(actual_start[2])
+            )
             _, reference_wrench = worker._contact_wrench()
             log_record(stream, {
                 "event": "spiral_force_baseline",
@@ -305,6 +313,8 @@ def main() -> None:
             search_records = 0
             max_engagement_ticks = 0
             tactile_candidate_seen = False
+            sensor_triggered_online = False
+            sensor_settle_rotation_deg = 0.0
             force_guarded = False
             spin_timed_out = False
             started = time.monotonic()
@@ -356,7 +366,7 @@ def main() -> None:
                         rotation_steps += batch if not socket_stepped else 0
                         if np.linalg.norm(
                             np.asarray(result["force_torque_peak_compensated"][:3], dtype=float)
-                        ) >= 50.0 or worker._confirmed_socket_seating():
+                        ) >= 50.0:
                             break
                     angle_progress = -(float(worker.data.qpos[worker.socket_joint_qpos])
                                        - rotation_start)
@@ -520,20 +530,35 @@ def main() -> None:
                     ) >= 50.0:
                         force_guarded = True
                         break
-                if worker.spiral_tactile_detector and worker.spiral_tactile_detector.candidate_detected:
-                    break
+                if (worker.spiral_tactile_detector
+                        and worker.spiral_tactile_detector.candidate_detected):
+                    if force_guarded:
+                        break
+                    sensor_triggered_online = True
+                    if worker.spiral_tactile_detector.seated:
+                        break
+                    worker.spiral_tactile_detector.candidate_detected = False
+                    worker.spiral_tactile_detector.candidate_latched = False
+                    worker.spiral_tactile_detector.confirmation_steps = 0
+                    worker.spiral_tactile_detector.force_drop_detected = False
+                    worker.spiral_tactile_detector.force_drop_age_steps = None
+                    worker.spiral_tactile_detector.axial_drop_condition_previous = False
+                    worker.spiral_tactile_detector.candidate_cooldown_steps = 500
+                    worker.spiral_tactile_detector.candidate_rearm_blocked = True
                 if rotation_start is not None and rotation_timeout:
                     spin_timed_out = True
                     break
 
             engaged, contact, axial, radial, alignment = worker._valid_socket_engagement()
             posthoc_geometry_validation = bool(
-                engaged and contact and worker.socket_engagement_ticks >= 20
-                and axial <= -0.0039 and radial <= 0.0015 and alignment >= 0.995
+                worker.socket_fit_ticks >= 20
+                and -0.014 <= axial <= -WORKER_MODULE.SPIRAL_MIN_SOCKET_INSERTION_M
+                and radial <= 0.0015 and alignment >= 0.995
             )
-            tactile_triggered = bool(
+            tactile_triggered = sensor_triggered_online
+            online_seating_confirmed = bool(
                 worker.spiral_tactile_detector
-                and worker.spiral_tactile_detector.candidate_detected
+                and worker.spiral_tactile_detector.seated
             )
             summary = {
                 "status": (
@@ -544,7 +569,7 @@ def main() -> None:
                     "socket_rotation_timeout"
                     if spin_timed_out else
                     "sensor_trigger_geometry_validated"
-                    if tactile_triggered and posthoc_geometry_validation else
+                    if online_seating_confirmed and posthoc_geometry_validation else
                     "sensor_trigger_not_geometry_validated"
                     if tactile_triggered else
                     "geometry_valid_without_sensor_trigger"
@@ -552,12 +577,18 @@ def main() -> None:
                 ),
                 "search_points_executed": search_records,
                 "sensor_triggered_by_force_tactile": tactile_triggered,
+                "online_sensor_triggered": sensor_triggered_online,
                 "sensor_thresholds_calibrated": bool(
                     worker.spiral_tactile_detector
                     and worker.spiral_tactile_detector.thresholds_calibrated
                 ),
+                "sensor_settle_rotation_deg": sensor_settle_rotation_deg,
                 "posthoc_geometry_validation": posthoc_geometry_validation,
-                "validated_success": tactile_triggered and posthoc_geometry_validation,
+                "validated_success": (
+                    online_seating_confirmed and posthoc_geometry_validation
+                ),
+                "geometry_seated_posthoc": posthoc_geometry_validation,
+                "online_seating_confirmed": online_seating_confirmed,
                 "tactile_seated": bool(worker.spiral_tactile_detector and
                                         worker.spiral_tactile_detector.seated),
                 "tactile_candidate": bool(worker.spiral_tactile_detector and
@@ -570,6 +601,8 @@ def main() -> None:
                 "socket_engaged_seen": worker.engaged_seen,
                 "socket_engagement_ticks_at_end": worker.socket_engagement_ticks,
                 "max_socket_engagement_ticks": max_engagement_ticks,
+                "socket_fit_geometry_ticks_at_end": worker.socket_fit_ticks,
+                "max_socket_fit_geometry_ticks": worker.max_socket_fit_ticks,
                 "tool_tip_world_m_at_end": worker.data.site_xpos[worker.tool_tip_id].tolist(),
                 "true_screw_center_world_m_private": screw_center.tolist(),
                 "true_xy_error_mm_private": ((worker.data.site_xpos[worker.tool_tip_id, :2]

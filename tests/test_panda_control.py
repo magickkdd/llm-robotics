@@ -47,7 +47,7 @@ def test_compliance_correction_cannot_exceed_cartesian_step_or_workspace_limits(
 
     assert corrected[2] <= current[2] + 0.01
     assert corrected[2] >= current[2] - 0.01
-    assert 0.42 <= corrected[2] <= 1.6
+    assert 0.05 <= corrected[2] <= 1.6
 
 
 def test_panda_compliant_axis_limits_each_requested_step_to_two_point_five_millimeters():

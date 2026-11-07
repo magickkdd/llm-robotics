@@ -116,3 +116,15 @@ def pixel_offset_to_camera_delta(
     if norm > max_delta_m > 0.0:
         delta *= max_delta_m / norm
     return offset_px, delta, float(regions[index, 4])
+
+
+def camera_delta_to_world(camera_rotation: np.ndarray, camera_delta: np.ndarray,
+                          gain: float = 0.25) -> np.ndarray:
+    """Map a target-directed camera-plane correction into world coordinates."""
+    rotation = np.asarray(camera_rotation, dtype=float)
+    delta = np.asarray(camera_delta, dtype=float)
+    if rotation.shape != (3, 3) or delta.shape != (2,):
+        raise ValueError("expected a 3x3 camera rotation and 2D camera delta")
+    if not np.isfinite(rotation).all() or not np.isfinite(delta).all() or not np.isfinite(gain):
+        raise ValueError("camera transform inputs must be finite")
+    return float(gain) * (rotation[:, 0] * delta[0] + rotation[:, 1] * delta[1])

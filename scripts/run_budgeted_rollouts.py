@@ -95,6 +95,8 @@ def main() -> None:
     parser.add_argument("--compliant-target-force-n", type=float, default=-2.0)
     parser.add_argument("--compliant-contact-threshold-n", type=float, default=1.0)
     parser.add_argument("--compliant-gain-m-per-n", type=float, default=0.0003)
+    parser.add_argument("--spiral-search", action="store_true",
+                        help="enable the atomic LIBERO XY spiral seating tool")
     parser.add_argument("--prior-learnings", type=Path,
                         help="optional rollout-context notes injected separately from base system docs")
     parser.add_argument("--output", type=Path, required=True, help="new directory for this run")
@@ -105,6 +107,10 @@ def main() -> None:
         parser.error("paid requests require --execute-paid-rollouts")
     if args.compliant_control and not args.force_feedback:
         parser.error("--compliant-control requires --force-feedback")
+    if args.spiral_search and not (args.force_feedback and args.compliant_control):
+        parser.error("--spiral-search requires --force-feedback and --compliant-control")
+    if args.spiral_search and args.compliant_axis != "z":
+        parser.error("--spiral-search requires --compliant-axis z")
     if args.total_budget <= 0 or args.episode_budget <= 0:
         parser.error("budgets must be positive")
     if not 0 <= args.start < args.start + args.episodes <= NUM_INIT_STATES:
@@ -193,6 +199,7 @@ def main() -> None:
         "compliant_target_force_n": args.compliant_target_force_n,
         "compliant_contact_threshold_n": args.compliant_contact_threshold_n,
         "compliant_gain_m_per_n": args.compliant_gain_m_per_n,
+        "spiral_search": args.spiral_search,
         "demonstrations": json.loads(args.demo_manifest.read_text()) if args.demo_manifest else False,
         "prior_learnings": str(args.prior_learnings.resolve()) if args.prior_learnings else None,
         "upstream_commit": (ROOT / "upstream_commit.txt").read_text().strip(),
@@ -228,7 +235,8 @@ def main() -> None:
                                           compliant_axis=args.compliant_axis,
                                           compliant_target_force_n=args.compliant_target_force_n,
                                           compliant_contact_threshold_n=args.compliant_contact_threshold_n,
-                                          compliant_gain_m_per_n=args.compliant_gain_m_per_n)
+                                          compliant_gain_m_per_n=args.compliant_gain_m_per_n,
+                                          spiral_search=args.spiral_search)
             policy_options = {
                 "model": policy_model, "base_url": policy_base_url, "api_key_env": key_env,
                 "env": {key_env: settings[key_env]}, "wire": wire,

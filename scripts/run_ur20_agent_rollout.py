@@ -115,7 +115,7 @@ def main() -> None:
                         required=True)
     parser.add_argument("--profile", choices=sorted(PROFILES), required=True)
     parser.add_argument("--max-calls", type=int, default=50)
-    parser.add_argument("--max-steps", type=int, default=600)
+    parser.add_argument("--max-steps", type=int, default=7500)
     parser.add_argument("--action-amplification", type=float, default=3.0,
                         help="multiply Cartesian target deltas before the 5 cm per-step cap (1-5; disabled after contact or low-confidence vision)")
     parser.add_argument("--state-id", type=int, choices=range(10), default=0)
@@ -132,7 +132,7 @@ def main() -> None:
     parser.add_argument("--spiral-search", action="store_true",
                         help="expose a bounded force-controlled spiral socket-seating primitive")
     parser.add_argument("--twist-after-seating", action="store_true",
-                        help="after stable seating, allow one bounded socket revolution; screw height remains fixed")
+                        help="after stable seating, run the bounded M6x1 screw extraction operation")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--execute-paid-rollouts", action="store_true", required=True)
     args = parser.parse_args()
@@ -159,6 +159,7 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=False)
     transport = BudgetTransport(args.output / "api", 100000, 100000, task_id=0,
                                 max_calls=args.max_calls, model=args.model,
+                                image_horizon=2, images_per_observation=5,
                                 max_output_tokens=args.max_output_tokens, base_url=base_url,
                                 endpoint_base_url=policy_base)
     transport.begin_episode(0)
@@ -181,9 +182,9 @@ def main() -> None:
     policy = agent_policy(**policy_options)
     policy._client._http.timeout = httpx.Timeout(args.request_timeout, connect=10.0)
     task_instruction = (
-        ("Seat the socket securely onto the M6 external-hex screw head, then turn the socket "
-         "counterclockwise one revolution while maintaining contact; the screw may rotate "
-         "in place but does not rise or extract. " if args.twist_after_seating else
+        ("Seat the socket securely onto the M6 external-hex screw head, then call turn_socket "
+         "once to unscrew and extract it through the modeled M6x1 thread. "
+         if args.twist_after_seating else
          "Seat the socket securely onto the M6 external-hex screw head. ")
         + "At every observation, "
         "use wristview-derived vision_screw_xy_estimate_m and vision_xy_error_m only when "
@@ -202,7 +203,8 @@ def main() -> None:
         "it or commanding an upward retreat. "
         + ("After XY alignment, when the estimated Z gap to the calibrated nominal "
            "screw-top plane is at most "
-           "5 cm, the controller enables a 2 N compliant axial setpoint. "
+           "5 cm, the controller ramps to a 1 N compliant axial-force setpoint by 1 cm "
+           "and maintains that setpoint after contact; measured force may fluctuate. "
            if args.compliant_control else "")
         + ("Once compensated tool-axis force reaches 1 N, contact takes priority over "
            "policy motion regardless of residual XY alignment. The controller latches "
@@ -220,8 +222,8 @@ def main() -> None:
         "external-hex screw head, the screw head will normally be occluded by the socket "
         "in agentview; treat this as supporting evidence, not proof by itself. Do not claim "
         "contact until supported by visual or force evidence. Success is "
-        + ("completion of the one-revolution turn_socket operation after stable seating; "
-           "the screw remains at fixed height and is not extracted. "
+        + ("completion of the 21 mm threaded screw-extraction operation after stable "
+           "seating. "
            if args.twist_after_seating else "stable physical socket engagement. ")
         + "Do not use move_to to rotate the socket."
     )
@@ -259,7 +261,7 @@ def main() -> None:
         summary = {"status": status, "runner_status": log.status,
                    "environment_success": embodiment.task_success,
                    "valid_socket_engagement_seen": embodiment.engaged_seen,
-                   "success_criterion": ("one_socket_revolution_after_stable_seating"
+                   "success_criterion": ("threaded_screw_extraction_after_stable_seating"
                                          if args.twist_after_seating else "stable_socket_engagement"),
                    "required_stable_physics_steps": 20,
                    "max_screw_lift_m": embodiment.max_screw_lift,
@@ -276,6 +278,7 @@ def main() -> None:
                    "socket_turn_completed": embodiment.socket_turn_completed,
                    "socket_turn_stop_reason": embodiment.socket_turn_stop_reason,
                    "socket_turn_screw_rotation_delta_rad": embodiment.socket_turn_screw_delta,
+                   "required_screw_extraction_m": 0.021 if args.twist_after_seating else None,
                    "action_amplification": args.action_amplification,
                    "video_frames": video_frame_count,
                    "video_fps": video_fps,

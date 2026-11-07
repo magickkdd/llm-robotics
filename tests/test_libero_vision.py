@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from inspect_robots.types import Observation
 from inspect_robots_agent._tools import build_toolset
 
-from panda_vision import pixel_offset_to_camera_delta, propose_regions
+from panda_vision import camera_delta_to_world, pixel_offset_to_camera_delta, propose_regions
 from inspect_robots_libero.embodiment import LiberoEmbodiment
 
 
@@ -40,6 +40,17 @@ def test_pixel_offset_becomes_bounded_camera_delta():
     assert offset[0] > 0.0
     assert np.linalg.norm(delta) <= 0.010001
     assert score > 0.0
+
+
+def test_camera_target_offset_maps_to_world_toward_target_in_both_image_axes():
+    image = np.zeros((256, 256, 3), dtype=np.uint8)
+    image[160:220, 180:240] = (255, 255, 255)
+    _, delta, _ = pixel_offset_to_camera_delta(
+        image, camera_fovy_deg=45.0, target_index=0, max_delta_m=0.01
+    )
+    correction = camera_delta_to_world(np.eye(3), delta, gain=1.0)
+    assert correction[0] > 0.0
+    assert correction[1] < 0.0
 
 
 def test_tool_exposes_llm_visual_target_choice_and_attaches_it_to_move():

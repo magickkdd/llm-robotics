@@ -56,3 +56,18 @@ def test_panda_compliant_control_requires_explicit_force_feedback():
     keys = [field.key for field in enabled.info.observation_space.state.fields]
     assert "wrist_force_delta_world" in keys
     assert "outer-loop pose correction" in enabled.info.docs
+
+
+def test_libero_action_and_compliance_bounds_allow_reaching_below_042m():
+    from inspect_robots_libero.panda_control import PANDA_POSITION_BOUNDS_M
+
+    embodiment = LiberoEmbodiment()
+    assert embodiment.info.action_space.low[2] == pytest.approx(0.05)
+    assert PANDA_POSITION_BOUNDS_M[2, 0] == pytest.approx(0.05)
+
+
+def test_compliant_axis_step_matches_agent_interpolation_limit():
+    default = LiberoEmbodiment()
+    compliant = LiberoEmbodiment(force_feedback=True, compliant_control=True)
+    assert default.info.action_space.semantics.max_step[2] == pytest.approx(0.01)
+    assert compliant.info.action_space.semantics.max_step[2] == pytest.approx(0.0025)

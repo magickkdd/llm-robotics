@@ -292,9 +292,8 @@ def test_spiral_tactile_detector_requires_axial_drop_during_lateral_confirmation
     assert not detector.candidate_detected
     assert not detector.update(1.0, (0.0, 0.0))
     for _ in range(ur20_screw_worker.SPIRAL_LATERAL_FORCE_CONFIRM_STEPS):
-        assert not detector.update(2.0, (0.0, 1.0))
-    assert detector.confirmation_steps == 0
-    assert not detector.candidate_detected
+        detector.update(1.0, (0.0, 1.0))
+    assert detector.candidate_detected
 
 
 def test_spiral_tactile_detector_expires_old_axial_drop_event():
@@ -324,7 +323,100 @@ def test_spiral_tactile_detector_does_not_treat_lateral_force_loss_as_rise():
     assert not detector.candidate_detected
 
 
-def test_spiral_search_starts_from_contact_force_baseline():
+def test_spiral_tactile_detector_uses_signed_axial_unloading_and_sequential_cues():
+    from ur20_screw_worker import SpiralTactileDetector
+
+    detector = SpiralTactileDetector(reference_force_n=-1.5)
+    assert not detector.update(-0.6, (0.0, 0.0))
+    assert detector.force_drop_detected
+    assert detector.axial_force_drop_n == 0.9
+    for _ in range(5):
+        detector.update(-0.6, (0.0, 0.8))
+    assert detector.candidate_detected
+
+
+def test_spiral_tactile_candidate_does_not_retrigger_until_cue_releases():
+    from ur20_screw_worker import SpiralTactileDetector
+
+    detector = SpiralTactileDetector(reference_force_n=1.5)
+    for _ in range(5):
+        detector.update(0.5, (0.0, 0.8))
+    assert detector.candidate_detected
+
+    detector.candidate_detected = False
+    detector.candidate_latched = False
+    detector.confirmation_steps = 0
+    detector.candidate_rearm_blocked = True
+    for _ in range(20):
+        detector.update(0.5, (0.0, 0.8))
+    assert not detector.candidate_detected
+
+    detector.update(1.5, (0.0, 0.0))
+    for _ in range(5):
+        detector.update(0.5, (0.0, 0.8))
+    assert detector.candidate_detected
+
+
+def test_spiral_tactile_detector_uses_encoder_downward_travel_with_lateral_resistance():
+    from ur20_screw_worker import SpiralTactileDetector
+
+    detector = SpiralTactileDetector(
+        reference_force_n=1.5, reference_lateral_force_xy=(0.0, 0.0),
+        reference_tool_z_m=0.153,
+    )
+    for _ in range(5):
+        detector.update(1.5, (0.0, 0.2), tool_z_m=0.1495)
+    assert not detector.candidate_detected
+    for _ in range(5):
+        detector.update(1.5, (0.0, 0.35), tool_z_m=0.1495)
+    assert detector.candidate_detected
+
+
+def test_spiral_tactile_detector_confirms_seating_from_encoder_travel_and_axial_load():
+    import ur20_screw_worker
+    from ur20_screw_worker import SpiralTactileDetector
+
+    detector = SpiralTactileDetector(reference_force_n=1.0, reference_tool_z_m=0.153)
+    for _ in range(ur20_screw_worker.SPIRAL_SEATED_CONFIRM_STEPS - 1):
+        assert not detector.update(0.8, (0.0, 0.0), tool_z_m=0.150)
+    assert detector.update(0.8, (0.0, 0.0), tool_z_m=0.150)
+    assert detector.seated
+    assert detector.phase == "seated"
+
+    assert not detector.thresholds_calibrated
+
+    not_seated = SpiralTactileDetector(reference_force_n=1.0, reference_tool_z_m=0.153)
+    for _ in range(ur20_screw_worker.SPIRAL_SEATED_CONFIRM_STEPS + 1):
+        not_seated.update(0.09, (0.0, 0.0), tool_z_m=0.149)
+    assert not not_seated.seated
+
+
+def test_worker_publishes_encoder_confirmed_seating_without_calibrated_lateral_thresholds():
+    import ur20_screw_worker
+    from ur20_screw_worker import SpiralTactileDetector
+
+    worker = ur20_screw_worker.Worker()
+    try:
+        worker.reset(0, include_force=True)
+        detector = SpiralTactileDetector(
+            reference_force_n=1.0,
+            reference_tool_z_m=float(worker.data.site_xpos[worker.tool_tip_id, 2]),
+        )
+        seated_z = detector.reference_tool_z_m - ur20_screw_worker.SPIRAL_MIN_SOCKET_INSERTION_M
+        for _ in range(ur20_screw_worker.SPIRAL_SEATED_CONFIRM_STEPS):
+            detector.update(0.8, (0.0, 0.0), tool_z_m=seated_z)
+        worker.spiral_tactile_detector = detector
+
+        observation = worker.observe(include_force=True)
+
+        assert observation["spiral_tactile_seated"]
+        assert observation["spiral_tactile_state"][1] == 1.0
+        assert observation["spiral_tactile_phase"] == "seated"
+    finally:
+        worker.close()
+
+
+def test_spiral_baseline_accepts_soft_preload_and_detects_half_depth_seating():
     import ur20_screw_worker
 
     worker = ur20_screw_worker.Worker.__new__(ur20_screw_worker.Worker)
@@ -346,7 +438,16 @@ def test_spiral_search_starts_from_contact_force_baseline():
     worker.screw_head_geom_id = 0
     worker.osc_target_position = None
     worker.osc_target_rotation = None
-    worker._contact_wrench = lambda: (np.zeros(6), np.array([0., 0., 1., 0., 0., 0.]))
+    worker._contact_wrench = lambda: (np.zeros(6), np.array([0., 0., 25., 0., 0., 0.]))
+    def settle_with_soft_preload(count, include_force, target_force_n, socket_velocity, **kwargs):
+        worker.data.site_xpos[0, 2] = -0.0035
+        return {
+            "force_samples": [
+                np.array([0.05, 0.0, 0.7, 0.0, 0.0, 0.0]) for _ in range(count)
+            ]
+        }
+
+    worker._run_control_steps = settle_with_soft_preload
     worker.model = type("Model", (), {"opt": type("Opt", (), {"timestep": 0.002})()})()
     worker.spiral_search_center = None
     worker.spiral_search_rotation = None
@@ -361,12 +462,33 @@ def test_spiral_search_starts_from_contact_force_baseline():
     worker._valid_socket_engagement = lambda: (False, False, 0.0, 0.0, 1.0)
     worker.observe = lambda include_force=False: {"force_torque_compensated": [0.] * 6}
 
-    result = worker._begin_spiral_search(2.0)
+    result = worker._spiral_search(25, include_force=True, target_force_n=1.0)
 
     assert not worker.spiral_search_guarded
-    assert worker.spiral_search_active
+    assert not worker.spiral_search_active
     assert worker.spiral_tactile_detector is not None
-    assert worker.spiral_reference_force_n == 1.0
+    assert worker.spiral_tactile_detector.seated
+    assert np.isclose(worker.spiral_reference_force_n, 0.7)
+    assert worker.spiral_search_state.tolist() == [0.0, 0.0, 0.0]
+    assert worker.spiral_force_baseline_settled
+    assert worker.spiral_force_baseline_settle_steps >= (
+        ur20_screw_worker.SPIRAL_FORCE_BASELINE_SETTLE_STABLE_STEPS
+    )
+
+
+def test_spiral_search_stops_after_one_complete_coverage():
+    import ur20_screw_worker
+
+    worker = ur20_screw_worker.Worker.__new__(ur20_screw_worker.Worker)
+    worker.spiral_search_index = ur20_screw_worker.SPIRAL_SEARCH_POINTS - 1
+    worker.spiral_search_exhausted = False
+    worker.spiral_search_active = True
+
+    worker._advance_spiral_search_index()
+
+    assert worker.spiral_search_index == ur20_screw_worker.SPIRAL_SEARCH_POINTS
+    assert worker.spiral_search_exhausted
+    assert not worker.spiral_search_active
 
 
 def test_osc_anchor_compensates_force_offset_for_tip_target():

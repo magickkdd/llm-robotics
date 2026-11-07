@@ -50,6 +50,7 @@ def test_force_observations_and_compliance_controls_are_opt_in():
                 "force_torque_peak_compensated"} <= force_fields
         assert "force_control_state" in compliant_fields
         assert "spiral_search_state" in spiral_fields
+        assert "spiral_search_exhausted" in spiral_fields
         assert "force_torque_compensated" in spiral_fields
         assert "spiral_axial_force_delta_n" in spiral_fields
         assert "spiral_tip_z_displacement_m" not in spiral_fields
@@ -100,10 +101,11 @@ def test_low_confidence_vision_freezes_lateral_motion_but_keeps_z_target():
     )
 
 
-def test_xy_alignment_is_recomputed_from_each_confident_two_millimeter_observation():
+def test_xy_alignment_uses_hysteresis_to_stay_locked_through_vision_jitter():
     aligned = {"vision_confidence": 0.9, "vision_xy_error_m": [0.0012, 0.0012]}
     boundary = {"vision_confidence": 0.9, "vision_xy_error_m": [0.002, 0.0]}
     outside = {"vision_confidence": 0.9, "vision_xy_error_m": [0.0021, 0.0]}
+    release_boundary = {"vision_confidence": 0.9, "vision_xy_error_m": [0.003, 0.0]}
     uncertain = {"vision_confidence": 0.4, "vision_xy_error_m": [0.0, 0.0]}
 
     assert UR20ScrewEmbodiment._vision_xy_aligned(aligned)
@@ -111,11 +113,23 @@ def test_xy_alignment_is_recomputed_from_each_confident_two_millimeter_observati
     assert not UR20ScrewEmbodiment._vision_xy_aligned(outside)
     assert not UR20ScrewEmbodiment._vision_xy_aligned(uncertain)
     assert XY_ALIGNMENT_TOLERANCE_M == 0.002
+    assert UR20ScrewEmbodiment._vision_xy_aligned(outside, currently_locked=True)
+    assert UR20ScrewEmbodiment._vision_xy_aligned(release_boundary, currently_locked=True)
+    assert not UR20ScrewEmbodiment._vision_xy_aligned(
+        {"vision_confidence": 0.9, "vision_xy_error_m": [0.0031, 0.0]},
+        currently_locked=True,
+    )
 
-    # The lock is a per-observation deadband, not a one-way latch.
     xy_locked = UR20ScrewEmbodiment._vision_xy_aligned(aligned)
     assert xy_locked
-    xy_locked = UR20ScrewEmbodiment._vision_xy_aligned(outside)
+    xy_locked = UR20ScrewEmbodiment._vision_xy_aligned(
+        outside, currently_locked=xy_locked
+    )
+    assert xy_locked
+    xy_locked = UR20ScrewEmbodiment._vision_xy_aligned(
+        {"vision_confidence": 0.9, "vision_xy_error_m": [0.0031, 0.0]},
+        currently_locked=xy_locked,
+    )
     assert not xy_locked
     xy_locked = UR20ScrewEmbodiment._vision_xy_aligned(aligned)
     assert xy_locked
@@ -195,10 +209,10 @@ def test_contact_with_lost_vision_keeps_force_and_leaves_spiral_invocation_to_mo
     embodiment._rpc = fake_rpc
     try:
         result = embodiment.step(Action(data=np.array([0.8, 1.0, 0.16])))
-        assert np.isclose(rpc_requests[0]["target_force_n"], 1.0)
+        assert np.isclose(rpc_requests[0]["target_force_n"], 0.5)
         result = embodiment.step(Action(data=np.array([0.8, 1.0, 0.16])))
         assert [request["spiral_search"] for request in rpc_requests] == [False, False]
-        assert rpc_requests[1]["target_force_n"] == 2.0
+        assert rpc_requests[1]["target_force_n"] == 1.0
         assert not result.terminated
         assert not result.info["xy_alignment_locked"]
         assert not result.info["success"]
@@ -249,6 +263,48 @@ def test_spiral_search_tool_gate_uses_compensated_axial_force():
         embodiment.close()
 
 
+def test_turn_socket_tool_gate_rejects_without_tactile_seating():
+    embodiment = UR20ScrewEmbodiment(
+        output_dir="/tmp/ur20-turn-socket-tool-gate", include_force=True,
+        compliant_control=True, spiral_search=True, twist_after_seating=True,
+    )
+    toolset = build_toolset(
+        embodiment.info.action_space, embodiment.info.observation_space,
+        embodiment.info.control_hz,
+    )
+    toolset.enable_ur20_spiral_search()
+    toolset.enable_ur20_socket_turn()
+    call = ToolCall(
+        id="turn-1", name="turn_socket", arguments='{"note":"extract screw"}'
+    )
+    try:
+        rejected = toolset.execute(
+            call,
+            Observation(state={
+                "eef_pos": np.array([0.8, 1.0, 0.15]),
+                "spiral_tactile_state": np.array([1.0, 0.0, -0.2, 0.03, 0.0, 1.0, 1.0]),
+                "spiral_search_exhausted": np.array([1.0]),
+            }),
+        )
+        assert rejected.chunk is None
+        assert "tactile seating is not confirmed" in rejected.error
+        assert "no simulation step was advanced" in rejected.error
+
+        accepted = toolset.execute(
+            call,
+            Observation(state={
+                "eef_pos": np.array([0.8, 1.0, 0.15]),
+                "spiral_tactile_state": np.array([2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                "spiral_search_exhausted": np.array([0.0]),
+            }),
+        )
+        assert accepted.error is None
+        assert accepted.chunk is not None
+        assert accepted.chunk.actions[0].meta["ur20_turn_socket"] is True
+    finally:
+        embodiment.close()
+
+
 def test_locked_xy_enforces_downward_progress_unless_force_guarded():
     current = np.array([0.8, 1.0, 0.16])
     lateral_or_stationary = np.array([0.803, 1.002, 0.16])
@@ -273,13 +329,13 @@ def test_confident_visual_misalignment_blocks_descent_but_allows_xy_correction()
     np.testing.assert_allclose(uncertain, target)
 
 
-def test_compliance_smoothly_ramps_from_zero_to_two_newtons_near_surface():
+def test_compliance_smoothly_ramps_from_zero_to_one_newton_near_surface():
     surface_z = 0.153
     assert force_setpoint_for_vertical_gap(0.21, surface_z, True) == 0.0
     assert force_setpoint_for_vertical_gap(0.203, surface_z, True) == 0.0
-    assert np.isclose(force_setpoint_for_vertical_gap(0.183, surface_z, True), 1.0)
-    assert force_setpoint_for_vertical_gap(0.163, surface_z, True) == 2.0
-    assert force_setpoint_for_vertical_gap(0.21, surface_z, True, contact_detected=True) == 2.0
+    assert np.isclose(force_setpoint_for_vertical_gap(0.183, surface_z, True), 0.5)
+    assert force_setpoint_for_vertical_gap(0.163, surface_z, True) == 1.0
+    assert force_setpoint_for_vertical_gap(0.21, surface_z, True, contact_detected=True) == 1.0
     assert force_setpoint_for_vertical_gap(0.18, surface_z, False) == 0.0
     assert COMPLIANT_APPROACH_DISTANCE_M == 0.05
     assert COMPLIANT_FULL_FORCE_DISTANCE_M == 0.01

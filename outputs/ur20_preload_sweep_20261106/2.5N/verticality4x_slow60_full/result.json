@@ -1,0 +1,44 @@
+{
+  "status": "sensor_trigger_geometry_validated",
+  "search_points_executed": 122,
+  "sensor_triggered_by_force_tactile": true,
+  "sensor_thresholds_calibrated": false,
+  "sensor_settle_rotation_deg": 59.95715710723056,
+  "posthoc_geometry_validation": true,
+  "validated_success": true,
+  "tactile_seated": false,
+  "tactile_candidate": true,
+  "tactile_candidate_seen": true,
+  "socket_engaged_at_end": true,
+  "socket_contact_at_end": true,
+  "socket_axial_error_m_at_end": -0.003967602030057083,
+  "socket_radial_error_m_at_end": 1.680223809453101e-05,
+  "socket_engaged_seen": true,
+  "socket_engagement_ticks_at_end": 274,
+  "max_socket_engagement_ticks": 42,
+  "tool_tip_world_m_at_end": [
+    0.800008838954947,
+    1.0000031740110278,
+    0.149024899292829
+  ],
+  "true_screw_center_world_m_private": [
+    0.8,
+    1.0
+  ],
+  "true_xy_error_mm_private": [
+    0.008838954946965849,
+    0.0031740110277844735
+  ],
+  "force_compensated_n_nm_at_end": [
+    0.007870985449575346,
+    0.06240708892391275,
+    0.18827992126376358,
+    0.03972155606753661,
+    -0.04710583773959897,
+    -0.019683966320921658
+  ],
+  "spiral_phase_offset_rad": 0.0,
+  "simulation_steps": 32393,
+  "simulation_time_s": 64.78600000003041,
+  "llm_calls": 0
+}
