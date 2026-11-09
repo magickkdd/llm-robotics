@@ -1,0 +1,479 @@
+"""Fail-closed spending caps for paid LLM rollouts, as an httpx transport.
+
+``LLMAgentPolicy`` accepts ``transport=``; this one sits between the policy and
+the provider. Before each request it reserves a conservative cost estimate and
+refuses to send when the per-episode or total budget would be exceeded, when a
+previous request's usage is unknown, or when the request targets anything but
+the model's own provider endpoint. Every request/response body is saved for
+audit; headers (the API key) never touch disk.
+
+Only models listed in ``PRICING`` are accepted. Add a row there (and a wire in
+``PROVIDER_WIRE`` for a new provider) to budget another model.
+"""
+import base64
+import hashlib
+import io
+import json
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urlsplit
+import httpx
+from PIL import Image
+
+class BudgetStop(RuntimeError):
+    pass
+
+# Hard backstop on the conservative request-size estimate. This estimator counts
+# serialized bytes as tokens and therefore substantially overstates provider usage;
+# the full-episode pilot measured about 20.6k real input tokens when it crossed the
+# former 200k local estimate. Keep a 600k estimate ceiling while independently
+# stopping if reported provider usage crosses the short-context pricing threshold.
+_MAX_INPUT_RESERVE_TOKENS=600000
+_OPENAI_SHORT_CONTEXT_TOKENS=200000
+_GEMINI_MAX_INPUT_RESERVE_TOKENS=1000000
+
+# Which real endpoint + request shape a wire uses. 'responses' is OpenAI's
+# Responses API; 'messages' is Anthropic's native Messages API -- different
+# host, path, and request/response schema.
+WIRE_ENDPOINTS={
+    'responses':('api.openai.com','/v1/responses'),
+    'messages':('api.anthropic.com','/v1/messages'),
+    # Google's OpenAI-compatible Chat Completions endpoint for Gemini.
+    'chat':('generativelanguage.googleapis.com','/v1beta/openai/chat/completions'),
+}
+# Provider prefix (the part before '/' in an upstream model id) -> wire this
+# transport audits for it.
+PROVIDER_WIRE={'openai':'responses','anthropic':'messages','google':'chat'}
+# Needed for thinking.block_binding (see handle_request).
+_THINKING_BINDING_BETA='thinking-binding-controls-2026-08-01'
+# Transient provider responses (rate limit, overload, gateway errors): retried here
+# before the request counts as failed. Providers do not bill these responses.
+_SERVER_ERROR_STATUSES=frozenset({408,409,429,500,502,503,504,520,529})
+_SERVER_ERROR_BACKOFF_S=(15,30,60,120,240,300)
+_CONNECT_TIMEOUT_BACKOFF_S=(10,20,40,80,120)
+_READ_ERROR_BACKOFF_S=(15,30,60,120,240)
+# Network faults after the connection is established (including stalled uploads);
+# retried with an extra budget reservation because the provider may still bill them.
+_RETRYABLE_NETWORK_ERRORS=(httpx.ReadTimeout,httpx.WriteTimeout,httpx.ReadError,
+                           httpx.WriteError,httpx.ConnectError,httpx.RemoteProtocolError,
+                           httpx.PoolTimeout)
+
+# Per-1M-token USD rates: (regular_input, cached_input, cache_write, output),
+# keyed by the upstream model id (``provider/model``). Input/output rates are
+# the providers' published prices. OpenAI input, cache, and output rates
+# were verified against official model pages on 2026-09-29. Anthropic rates
+# retain the original 2026-09-22 assumptions (cache write = 1.25x input). They only affect
+# ``estimated_usd``; ``budget_charge_usd`` always bills all input at the
+# cache-write rate, so the budget stays conservative either way.
+PRICING={
+    'openai/gpt-6-astra':(10.,1.,12.5,50.),
+    'openai/gpt-6-luna':(0.10,0.01,0.125,0.50),
+    'openai/gpt-6.1-terra':(10.,1.,12.5,50.),
+    'openai/gpt-6-sol':(2.,0.2,2.5,10.),
+    # Conservative local reservation for the Diosir-hosted GPT-6.1-SOL profile.
+    'openai/gpt-6.1-sol':(10.,1.,12.5,50.),
+    # DeepSeek public peak rates used as a conservative local estimate for OpenAI-compatible gateways.
+    'openai/deepseek-v4.1-flash-1017':(0.30,0.006,0.30,1.20),
+    'anthropic/claude-opus-5-5':(4.,0.2,5.,20.),
+    # $5/$25 published; cache read 0.1x and 5-minute cache write 1.25x of input (2026-10-11).
+    'anthropic/claude-opus-5':(5.,0.5,6.25,25.),
+    # Google AI Studio paid tier, verified 2026-10-14: $2 input, $0.10 implicit-cache read,
+    # $10 output including thinking. Implicit caching has no write charge, so the
+    # cache-write rate is the input rate. Prices double on 2026-12-01.
+    'google/gemini-4-argon':(2.,0.1,2.,10.),
+}
+
+
+def wire_for(model, base_url=None):
+    """Return the wire this transport audits for ``model`` (a ``provider/model`` id)."""
+    if model not in PRICING:
+        raise ValueError(f'no pricing for {model!r}; budgeted models: {sorted(PRICING)}. '
+                         'Add a row to ur20_screw/budget.py first.')
+    if base_url:
+        parsed=urlsplit(base_url.rstrip('/'))
+        if (parsed.scheme,parsed.username,parsed.password,parsed.port,
+                parsed.query,parsed.fragment)!=('https',None,None,None,'','') or not parsed.hostname or parsed.path not in ('','/v1'):
+            raise ValueError('OPENAI_BASE_URL must be an HTTPS origin with an optional /v1 path')
+        if model.partition('/')[0]!='openai':
+            raise ValueError('OPENAI_BASE_URL can only be used with openai/* models')
+        return 'responses'
+    return PROVIDER_WIRE[model.partition('/')[0]]
+
+
+class BudgetTransport(httpx.BaseTransport):
+    def __init__(self, output, total_budget, episode_budget=3., inner=None, task_id=0, max_calls=80, model='openai/gpt-6-astra', image_horizon=2, images_per_observation=2, max_output_tokens=8192, base_url=None, endpoint_base_url=None):
+        if not isinstance(max_output_tokens, int) or not 1 <= max_output_tokens <= 128000:
+            raise ValueError("max_output_tokens must be an integer in 1..128000")
+        self.max_output_tokens=max_output_tokens
+        self.output=Path(output)
+        self.output.mkdir(parents=True, exist_ok=True)
+        self.task_id=task_id
+        self.max_calls=max_calls
+        # None keeps the full image history.
+        self.max_live_images=(None if image_horizon is None
+                              else images_per_observation*image_horizon)
+        self.wire=wire_for(model,base_url=base_url)
+        self.model=model
+        self.base_url=base_url.rstrip('/') if base_url else None
+        if self.base_url:
+            parsed=urlsplit(self.base_url)
+            self.expected_host=parsed.hostname
+            endpoint_path=parsed.path.rstrip('/') or '/v1'
+            if endpoint_base_url is not None:
+                endpoint=urlsplit(endpoint_base_url.rstrip('/'))
+                if ((endpoint.scheme,endpoint.hostname,endpoint.port)!=(parsed.scheme,parsed.hostname,parsed.port)
+                        or endpoint.username is not None or endpoint.password is not None
+                        or endpoint.query or endpoint.fragment or endpoint.path not in ('','/','/v1')):
+                    raise ValueError('endpoint_base_url must use the configured HTTPS host with an optional /v1 path')
+                endpoint_path=endpoint.path.rstrip('/')
+            self.expected_path=endpoint_path+'/responses'
+        else:
+            self.expected_host,self.expected_path=WIRE_ENDPOINTS[self.wire]
+        # The configured proxy accepts the model identifier without its provider prefix.
+        self.wire_model=model.partition('/')[2]
+        self.total_budget=total_budget
+        self.episode_budget=episode_budget
+        self.used=0.
+        self.episode_used=0.
+        self.estimated=0.
+        self.episode_estimated=0.
+        self.calls=0
+        self.episode=None
+        self.blocked=None
+        self.uncertain=False
+        self.inner=inner if inner is not None else httpx.HTTPTransport(retries=0)
+
+    def begin_episode(self, episode):
+        self.episode=episode
+        self.episode_used=0.
+        self.episode_estimated=0.
+        self.calls=0
+        self.blocked=None
+
+    def record(self, data):
+        with (self.output/'api_usage.jsonl').open('a') as f:
+            f.write(json.dumps({'task_id':self.task_id,'episode':self.episode,'time':time.time(),**data})+'\n')
+            f.flush()
+
+    def progress(self, text):
+        """One human-readable line per LLM call on stderr, so a live run shows progress."""
+        print(f'[episode {self.episode} | call {self.calls}/{self.max_calls}] {text}',
+              file=sys.stderr, flush=True)
+
+    def stop(self, reason):
+        self.blocked=reason
+        self.record({'event':'blocked_before_request','reason':reason})
+        self.progress(f'stopped before sending: {reason}')
+        raise BudgetStop(reason)
+
+    def _estimate(self, body):
+        images=0
+        image_tokens=0
+        signature_tokens=0
+        def walk(value):
+            nonlocal images, image_tokens, signature_tokens
+            if isinstance(value,dict):
+                if self.wire=='responses' and value.get('type')=='input_image':
+                    url=value.get('image_url','')
+                    if not url.startswith('data:image/png;base64,'):
+                        self.stop('unsupported_image')
+                    data=url.split(',',1)[1]
+                    im=Image.open(io.BytesIO(base64.b64decode(data)))
+                    if im.size != (256,256):
+                        self.stop('unexpected_image_size')
+                    images+=1
+                    image_tokens+=8192
+                    value['detail']='high'
+                    return {'type':'input_image','image_url':'[image]','detail':'high'}
+                if self.wire=='chat' and value.get('type')=='image_url':
+                    url=(value.get('image_url') or {}).get('url','')
+                    if not url.startswith('data:image/png;base64,'):
+                        self.stop('unsupported_image')
+                    data=url.split(',',1)[1]
+                    im=Image.open(io.BytesIO(base64.b64decode(data)))
+                    if im.size != (256,256):
+                        self.stop('unexpected_image_size')
+                    images+=1
+                    image_tokens+=8192
+                    return {'type':'image_url','image_url':{'url':'[image]'}}
+                if self.wire=='messages' and value.get('type')=='image':
+                    source=value.get('source') or {}
+                    if source.get('type')!='base64' or source.get('media_type')!='image/png':
+                        self.stop('unsupported_image')
+                    data=source.get('data','')
+                    im=Image.open(io.BytesIO(base64.b64decode(data)))
+                    if im.size != (256,256):
+                        self.stop('unexpected_image_size')
+                    images+=1
+                    # Anthropic bills about w*h/750 tokens per image; reserve 2x.
+                    image_tokens+=2*(-(-im.size[0]*im.size[1]//750))
+                    return {'type':'image','source':{'type':'base64','media_type':'image/png','data':'[image]'}}
+                if self.wire=='chat' and isinstance(value.get('thought_signature'),str):
+                    # Gemini replays each call's thinking as an opaque thought_signature (about
+                    # 4 bytes per thinking token) and bills it as input; count it at that rate
+                    # instead of one token per byte, which would hit the ceiling by call ~30.
+                    signature_tokens+=len(value['thought_signature'])//4
+                    return {k:walk(v) for k,v in value.items() if k!='thought_signature'}
+                if self.wire=='messages' and value.get('type')=='thinking' and 'signature' in value:
+                    # The signature carries the encrypted thinking. Opus 5 bills replayed thinking
+                    # as input (about 4 signature bytes per thinking token); Opus 5.5 does not. Counting
+                    # every byte stopped a 26k-token Opus 5.5 request at the 600k ceiling, and counting
+                    # none undercut real Opus 5 input, so reserve half a token per signature byte.
+                    signature_tokens+=len(value['signature'])//2
+                    return {k:walk(v) for k,v in value.items() if k!='signature'}
+                return {k:walk(v) for k,v in value.items()}
+            if isinstance(value,list):
+                return [walk(v) for v in value]
+            return value
+        text=walk(body)
+        return text,images,image_tokens+signature_tokens
+
+    def handle_request(self, request):
+        if self.uncertain:
+            self.stop('previous_request_usage_unknown')
+        if self.episode is None:
+            self.stop('not_inside_rollout')
+        if self.calls>=self.max_calls:
+            self.stop('api_attempt_limit')
+        if (request.method, request.url.scheme, request.url.host, request.url.path) != (
+                'POST','https',self.expected_host,self.expected_path):
+            self.stop('endpoint_not_allowed')
+        body=json.loads(request.read())
+        if body.get('model')!=self.wire_model:
+            self.stop('model_not_allowed')
+        tools=body.get('tools', [])
+        if self.wire in ('responses','chat'):
+            if any(t.get('type')!='function' for t in tools):
+                self.stop('non_robot_function_tool')
+        else:
+            # Anthropic's flat tool shape has no "type" key at all (see
+            # _anthropic.py:_translate_tools); well-formedness is name +
+            # input_schema instead.
+            if any('name' not in t or 'input_schema' not in t for t in tools):
+                self.stop('non_robot_function_tool')
+        if self.wire=='responses':
+            body.update(max_output_tokens=self.max_output_tokens, service_tier='default', store=False)
+            body['metadata']={'experiment':'ur20_screw_removal','task_id':str(self.task_id),'episode':str(self.episode)}
+            if self.model=='openai/deepseek-v4.1-flash-1017':
+                body.pop('include',None)
+            output_cap=self.max_output_tokens
+        elif self.wire=='chat':
+            # Upstream's chat client sends no output limit. On Gemini, max_completion_tokens
+            # caps thinking plus the visible answer together, like max_output_tokens above.
+            body['max_completion_tokens']=self.max_output_tokens
+            output_cap=self.max_output_tokens
+        else:
+            # _anthropic.py already sets max_tokens on the outgoing body;
+            # Responses-specific fields (max_output_tokens, service_tier,
+            # store, metadata's free-form shape) don't exist on this wire and
+            # would risk an unexpected-field rejection if forced on here.
+            output_cap=int(body.get('max_tokens') or 16000)
+            # image_horizon stubs out older camera frames, which rewrites the history
+            # that earlier thinking blocks were signed against; the API then rejects the
+            # whole request (HTTP 400). Ask it to drop those stale blocks instead.
+            thinking=body.get('thinking')
+            if isinstance(thinking,dict) and thinking.get('type')!='disabled':
+                thinking['block_binding']={'prefix_mismatch_behavior':'drop_block'}
+        text,images,image_tokens=self._estimate(body)
+        # Conservative local reservation, NOT a provider-guaranteed tokenizer.
+        # Count all nonimage JSON bytes + per-image tokens (see _estimate) + schema overhead.
+        # No cache discount in reservation; assume cache writes at 1.25x input price.
+        input_reserve=len(json.dumps(text,ensure_ascii=False).encode())+image_tokens+4096
+        too_many_images=(self.max_live_images is not None
+                         and images>self.max_live_images)
+        # Keep OpenAI requests below long-context pricing thresholds.
+        input_limit=_MAX_INPUT_RESERVE_TOKENS
+        if self.wire=='chat':
+            # Gemini accepts about 1.05M input tokens, and replayed thinking makes late calls
+            # in an 80-call episode reach a few hundred thousand real tokens.
+            input_limit=_GEMINI_MAX_INPUT_RESERVE_TOKENS
+        if too_many_images or input_reserve>input_limit:
+            self.stop('input_reservation_limit')
+        # Reserve the full enforced output limit, including reasoning tokens.
+        _,_,write_rate,out_rate=PRICING[self.model]
+        reserve=input_reserve*write_rate/1e6+output_cap*out_rate/1e6
+        if self.used+reserve>self.total_budget or self.episode_used+reserve>self.episode_budget:
+            self.stop('budget_reservation_limit')
+        self.calls+=1
+        self.used+=reserve
+        self.episode_used+=reserve
+        content=json.dumps(body).encode()
+        # Preserve authorization only in memory; never write headers to disk.
+        headers=dict(request.headers)
+        headers.pop('content-length',None)
+        if 'block_binding' in (body.get('thinking') or {}):
+            betas=[b for b in headers.get('anthropic-beta','').split(',') if b]
+            headers['anthropic-beta']=','.join(betas+[_THINKING_BINDING_BETA])
+        def outgoing_request():
+            return httpx.Request('POST',request.url,headers=headers,content=content,
+                                 extensions=request.extensions)
+        ident=f'ep{self.episode:02d}_call{self.calls:02d}'
+        self.record({'event':'request_started','call':self.calls,'reservation_usd':reserve,
+                     'input_token_reservation':input_reserve,'output_token_cap':output_cap,'images':images,'sha256':hashlib.sha256(content).hexdigest()})
+        (self.output/f'{ident}_request.json').write_bytes(content)
+        self.progress('waiting for the model...')
+        request_start=time.monotonic()
+
+        read_retries=0
+
+        def send_with_connect_retries():
+            for retry, wait in enumerate((*_CONNECT_TIMEOUT_BACKOFF_S, None)):
+                try:
+                    response=self.inner.handle_request(outgoing_request())
+                    response.read()
+                    return response
+                except httpx.ConnectTimeout:
+                    if wait is None:
+                        if read_retries==0:
+                            self.used-=reserve
+                            self.episode_used-=reserve
+                        self.blocked='connect_timeout_exhausted'
+                        self.record({'event':'connect_timeout_exhausted','call':self.calls,
+                                     'released_usd':reserve if read_retries==0 else 0,
+                                     'latency_s':time.monotonic()-request_start,
+                                     'retries':retry})
+                        self.progress(f'connection timed out after {retry} retries; stopping without marking usage unknown')
+                        raise BudgetStop('connect_timeout_exhausted') from None
+                    self.record({'event':'connect_timeout_retry','call':self.calls,
+                                 'retry':retry+1,'wait_s':wait})
+                    self.progress(f'connection timed out; retry {retry+1}/{len(_CONNECT_TIMEOUT_BACKOFF_S)} in {wait}s')
+                    time.sleep(wait)
+
+        def send_with_read_retries():
+            nonlocal read_retries
+            while True:
+                try:
+                    return send_with_connect_retries()
+                except BudgetStop:
+                    raise
+                except Exception as exc:
+                    retryable=isinstance(exc,_RETRYABLE_NETWORK_ERRORS)
+                    if retryable and read_retries<len(_READ_ERROR_BACKOFF_S):
+                        if self.used+reserve>self.total_budget or self.episode_used+reserve>self.episode_budget:
+                            self.uncertain=True
+                            self.record({'event':'usage_unknown','call':self.calls,
+                                         'reserved_usd':reserve*(read_retries+1),
+                                         'latency_s':time.monotonic()-request_start,
+                                         'error_type':type(exc).__name__,
+                                         'retry_stopped':'budget_reservation_limit'})
+                            self.progress('read failed; retry blocked by budget reservation limit, usage unknown')
+                            raise BudgetStop('network_error_usage_unknown') from None
+                        wait=_READ_ERROR_BACKOFF_S[read_retries]
+                        read_retries+=1
+                        self.used+=reserve
+                        self.episode_used+=reserve
+                        self.record({'event':'read_error_retry','call':self.calls,
+                                     'retry':read_retries,'wait_s':wait,
+                                     'error_type':type(exc).__name__,
+                                     'additional_reservation_usd':reserve})
+                        self.progress(f'{type(exc).__name__}; retry {read_retries}/{len(_READ_ERROR_BACKOFF_S)} in {wait}s (additional budget reserved)')
+                        time.sleep(wait)
+                        continue
+                    self.uncertain=True
+                    self.record({'event':'usage_unknown','call':self.calls,
+                                 'reserved_usd':reserve*(read_retries+1),
+                                 'latency_s':time.monotonic()-request_start,
+                                 'error_type':type(exc).__name__})
+                    self.progress(f'network error ({type(exc).__name__}), usage unknown; stopping')
+                    raise BudgetStop('network_error_usage_unknown') from None
+
+        response=send_with_read_retries()
+        for attempt in range(len(_SERVER_ERROR_BACKOFF_S)+1):
+            if response.status_code not in _SERVER_ERROR_STATUSES or attempt==len(_SERVER_ERROR_BACKOFF_S):
+                break
+            wait=_SERVER_ERROR_BACKOFF_S[attempt]
+            self.record({'event':'server_error_retry','call':self.calls,
+                         'http_status':response.status_code,'wait_s':wait})
+            self.progress(f'HTTP {response.status_code} (transient provider response); retrying in {wait}s')
+            time.sleep(wait)
+            response=send_with_read_retries()
+        payload=None
+        try:
+            payload=response.json()
+        except ValueError:
+            pass
+        usage=payload.get('usage') if isinstance(payload,dict) else None
+        (self.output/f'{ident}_response.json').write_bytes(response.content)
+        error=payload.get('error') if isinstance(payload,dict) else None
+        error_code=(error.get('code') if self.wire=='responses' else error.get('type')) if isinstance(error,dict) else None
+        request_id=response.headers.get('x-request-id') or response.headers.get('request-id')
+        data={'event':'response','call':self.calls,'http_status':response.status_code,
+              'request_id':request_id,
+              'response_id':payload.get('id') if isinstance(payload,dict) else None,'usage':usage,
+              'api_error_code':error_code,'latency_s':time.monotonic()-request_start,
+              'response_status':payload.get('status') if isinstance(payload,dict) else None,
+              'incomplete_details':payload.get('incomplete_details') if isinstance(payload,dict) else None}
+        usage_keys=('prompt_tokens','total_tokens') if self.wire=='chat' else ('input_tokens','output_tokens')
+        valid_usage=isinstance(usage,dict) and all(
+            isinstance(usage.get(k),int) and not isinstance(usage.get(k),bool) and usage[k]>=0
+            for k in usage_keys)
+        if valid_usage and response.status_code==200:
+            in_rate,cached_rate,write_rate,out_rate=PRICING[self.model]
+            if self.wire=='chat':
+                # Gemini's completion_tokens leaves out thinking, which is billed as output;
+                # total_tokens - prompt_tokens is the full billed output.
+                out=int(usage['total_tokens'])-int(usage['prompt_tokens'])
+                data['finish_reason']=[c.get('finish_reason') for c in payload.get('choices') or []] if isinstance(payload,dict) else None
+            else:
+                out=int(usage['output_tokens'])
+            if self.wire=='chat':
+                inp=int(usage['prompt_tokens'])
+                cached=int((usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
+                total_in=inp
+                estimated=((inp-cached)*in_rate+cached*cached_rate+out*out_rate)/1e6
+            elif self.wire=='responses':
+                inp=int(usage['input_tokens'])
+                cached=int((usage.get('input_tokens_details') or {}).get('cached_tokens',0))
+                written=int((usage.get('input_tokens_details') or {}).get('cache_write_tokens',0))
+                total_in=inp
+                estimated=((inp-cached-written)*in_rate+cached*cached_rate+written*write_rate+out*out_rate)/1e6
+            else:
+                # Anthropic reports input_tokens as ONLY the fresh (non-cached)
+                # portion; cache_creation/cache_read are separate additive
+                # fields, not subsets of input_tokens (opposite of OpenAI's
+                # Responses shape, where input_tokens is the inclusive total).
+                fresh=int(usage.get('input_tokens',0))
+                written=int(usage.get('cache_creation_input_tokens',0))
+                cached=int(usage.get('cache_read_input_tokens',0))
+                total_in=fresh+written+cached
+                estimated=(fresh*in_rate+cached*cached_rate+written*write_rate+out*out_rate)/1e6
+            # Budget counts all input at cache-write rate, even if discounted in billing.
+            conservative=(total_in*write_rate+out*out_rate)/1e6
+            self.used+=conservative-reserve
+            self.episode_used+=conservative-reserve
+            data.update(estimated_usd=estimated,budget_charge_usd=conservative,
+                        total_budget_charge_usd=self.used)
+            self.estimated+=estimated
+            self.episode_estimated+=estimated
+            self.progress(f'ok: {total_in} in / {out} out tokens, ~${estimated:.3f}; '
+                          f'episode ~${self.episode_estimated:.2f}, run ~${self.estimated:.2f} '
+                          f'(budget reserved ${self.used:.2f}/{self.total_budget:g})')
+            if total_in>input_reserve or out>output_cap:
+                self.uncertain=True
+                data['reservation_exceeded']=True
+            if self.wire=='responses' and total_in>_OPENAI_SHORT_CONTEXT_TOKENS:
+                self.uncertain=True
+                data['short_context_pricing_exceeded']=True
+        elif response.status_code in _SERVER_ERROR_STATUSES:
+            # These transient failures carry an error body and are not billed: release the
+            # reservation so this episode fails alone instead of blocking the whole run.
+            self.used-=reserve
+            self.episode_used-=reserve
+            data['released_usd']=reserve
+            self.progress(f'HTTP {response.status_code} after {len(_SERVER_ERROR_BACKOFF_S)} '
+                          'retries; not billed, this episode will stop')
+        else:
+            self.uncertain=True
+            data['reserved_usd']=reserve
+            message=error.get('message','') if isinstance(error,dict) else ''
+            self.progress(f'HTTP {response.status_code} {error_code or ""}: {message[:200]}')
+        self.record(data)
+        return response
+
+    def close(self):
+        # Shared across per-episode clients; the run owner disposes it once.
+        pass
+
+    def dispose(self):
+        self.inner.close()

@@ -3,9 +3,8 @@
 .env.*
 !.env.example
 
-# Local environments and the pinned upstream checkout (see README).
+# Local environment.
 .venv/
-vendor/
 
 # Rollout videos, eval logs, API audit files.
 outputs/

@@ -5,8 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 import httpx
-from inspect_robots_libero import budget
-from inspect_robots_libero.budget import BudgetStop, BudgetTransport
+from ur20_screw.policy import budget
+from ur20_screw.policy.budget import BudgetStop, BudgetTransport
 
 class BudgetTests(unittest.TestCase):
     def setUp(self):
@@ -108,6 +108,26 @@ class BudgetTests(unittest.TestCase):
         rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
         self.assertEqual(sum(row['event']=='read_error_retry' for row in rows),1)
         self.assertGreater(self.transport.used,rows[0]['reservation_usd'])
+
+    def test_write_timeout_retries_then_succeeds(self):
+        self.transport.begin_episode(0)
+        attempts={'count':0}
+        def reply(request):
+            attempts['count']+=1
+            if attempts['count']==1:
+                raise httpx.WriteTimeout('mock write timeout')
+            return httpx.Response(200,json={'id':'resp_mock','output':[],
+                'usage':{'input_tokens':100,'output_tokens':50}})
+        self.transport.inner=httpx.MockTransport(reply)
+        with (mock.patch.object(budget,'_READ_ERROR_BACKOFF_S',(0,)),
+              mock.patch.object(budget.time,'sleep')):
+            self.assertEqual(self.request().status_code,200)
+        self.assertEqual(attempts['count'],2)
+        self.assertEqual(self.transport.calls,1)
+        self.assertFalse(self.transport.uncertain)
+        rows=[json.loads(x) for x in (Path(self.tmp.name)/'api_usage.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(row['event']=='read_error_retry' for row in rows),1)
+        self.assertGreater(self.transport.used,0.)
 
     def test_connect_timeout_retries_then_succeeds_as_one_call(self):
         self.transport.begin_episode(0)
@@ -248,10 +268,29 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(budget.wire_for('openai/deepseek-v4.1-flash-1017',
                                          base_url='https://discovery-api.intern-ai.org.cn/v1'),
                          'responses')
+        self.assertEqual(budget.wire_for('openai/gpt-6.1-sol',
+                                         base_url='https://api.diosirapi.co.uk/v1'),
+                         'responses')
         for base_url in ('http://discovery-api.intern-ai.org.cn/v1',
                          'https://example.com/v2','https://discovery-api.intern-ai.org.cn/v1/other'):
             with self.subTest(base_url=base_url), self.assertRaises(ValueError):
                 budget.wire_for('openai/deepseek-v4.1-flash-1017',base_url=base_url)
+
+    def test_sol61_diosir_endpoint_is_pinned_to_responses_path(self):
+        transport=BudgetTransport(self.tmp.name,15,inner=httpx.MockTransport(
+            lambda request:httpx.Response(200,json={'usage':{'input_tokens':100,'output_tokens':50},
+                                                    'output':[]})),
+            model='openai/gpt-6.1-sol',base_url='https://api.diosirapi.co.uk/v1')
+        try:
+            self.assertEqual(transport.expected_host,'api.diosirapi.co.uk')
+            self.assertEqual(transport.expected_path,'/v1/responses')
+            transport.begin_episode(0)
+            with httpx.Client(transport=transport) as client:
+                response=client.post('https://api.diosirapi.co.uk/v1/responses',json={
+                    'model':'gpt-6.1-sol','input':'offline','tools':[]})
+            self.assertEqual(response.status_code,200)
+        finally:
+            transport.dispose()
 
 class AnthropicBudgetTests(unittest.TestCase):
     def setUp(self):

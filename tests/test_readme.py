@@ -1,20 +1,18 @@
-"""README stays in sync with the prompt notes the model actually receives."""
-import re
+"""README documents the standalone UR20 project and its supported entry points."""
 import unittest
 from pathlib import Path
-
-from inspect_robots_libero.embodiment import BASE_DOCS
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 
 
 class ReadmeTests(unittest.TestCase):
-    def test_readme_quotes_base_docs(self):
-        # The README wraps lines for display, so compare with whitespace collapsed.
+    def test_readme_describes_ur20_install_and_run_commands(self):
         text = README.read_text()
-        section = text.split("## What the model is told", 1)[1]
-        quoted = re.search(r"```text\n(.*?)```", section, re.S).group(1)
-        self.assertEqual(" ".join(quoted.split()), " ".join(BASE_DOCS.split()))
+        self.assertIn("UR20 Screw Removal", text)
+        self.assertIn("scripts/rollout/run_episode.py", text)
+        self.assertIn("scripts/rollout/run_mock.py", text)
+        self.assertNotIn("LIBERO", text)
+        self.assertNotIn("inspect-robots", text)
 
 
 if __name__ == "__main__":

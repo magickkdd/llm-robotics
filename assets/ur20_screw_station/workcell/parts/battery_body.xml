@@ -8,8 +8,12 @@
   <geom name="battery_visual" type="mesh" mesh="battery" material="battery"
         contype="0" conaffinity="0" group="2"/>
 
-  <!-- 主板顶面约 z=0.148 m；后侧凸边另由视觉网格呈现，不应把整个顶面抬高到 0.273 m。 -->
-  <geom name="battery_collision" type="box" size="0.66 0.485 0.074" pos="0 0 0.074"
+  <!-- 碰撞近似分两层：下层的底板/裙边止于 z=0.058（孔口平面），上层电池本体
+       （x ±0.624、y ±0.449）从 0.058 起。这样裙边法兰上方的空间是开放的，
+       工具可以垂直下到裙边孔位；顶面仍在 z=0.148。 -->
+  <geom name="battery_collision_plate" type="box" size="0.66 0.485 0.029" pos="0 0 0.029"
+        group="3" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
+  <geom name="battery_collision_body" type="box" size="0.624 0.449 0.045" pos="0 0 0.103"
         group="3" friction="1 0.02 0.01" contype="2" conaffinity="3"/>
 
   <site name="battery_top" pos="0 0 0.273" size="0.02 0.02 0.02" rgba="0.2 0.9 0.2 0.6"/>
