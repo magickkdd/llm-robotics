@@ -18,7 +18,14 @@ from ur20_screw.simulation.robot import (
     prevent_unaligned_descent,
     force_setpoint_for_vertical_gap,
 )
-from ur20_screw.control.actions import action_for
+from ur20_screw.control.actions import action_for, sequence_targets
+from ur20_screw.simulation.worker import screw_extraction_completed
+
+
+def test_screw_extraction_completion_uses_measured_lift():
+    assert not screw_extraction_completed(0.0, 0.0207259)
+    assert not screw_extraction_completed(0.004, 0.0249999)
+    assert screw_extraction_completed(0.004, 0.025)
 
 
 def test_force_observations_and_compliance_controls_are_opt_in():
@@ -283,6 +290,48 @@ def test_turn_socket_tool_gate_rejects_without_tactile_seating():
         assert accepted.meta["ur20_turn_socket"] is True
     finally:
         embodiment.close()
+
+
+def test_action_stream_waypoints_are_bounded_and_absolute():
+    waypoints = sequence_targets({
+        "note": "clear approach",
+        "waypoints": [
+            {"targets": {"x": 0.81, "z": 0.19}},
+            {"targets": {"x": 0.79}},
+        ],
+    })
+    assert waypoints == [{"x": 0.81, "z": 0.19}, {"x": 0.79}]
+    for invalid in (
+        {"note": "clear", "waypoints": []},
+        {"note": "clear", "waypoints": [{"targets": {"roll": 1}}]},
+        {"note": "clear", "waypoints": [{"targets": {"x": float("nan")}}]},
+        {"note": "clear", "waypoints": [{"targets": {"x": 0}}] * 5},
+    ):
+        with np.testing.assert_raises(ValueError):
+            sequence_targets(invalid)
+
+
+def test_action_stream_commits_at_contact_vision_loss_or_alignment_change():
+    robot = UR20ScrewEmbodiment(
+        output_dir="/tmp/ur20-action-stream-commit", include_force=True,
+        compliant_control=True, spiral_search=True,
+    )
+    try:
+        robot._last_vision_confidence = 0.9
+        robot._last_axial_contact = False
+        robot._xy_alignment_locked = False
+        robot.begin_action_stream()
+        assert not robot.action_stream_should_commit()
+        robot._last_axial_contact = True
+        assert robot.action_stream_should_commit()
+        robot._last_axial_contact = False
+        robot._last_vision_confidence = 0.69
+        assert robot.action_stream_should_commit()
+        robot._last_vision_confidence = 0.9
+        robot._xy_alignment_locked = True
+        assert robot.action_stream_should_commit()
+    finally:
+        robot.close()
 
 
 def test_locked_xy_enforces_downward_progress_unless_force_guarded():

@@ -152,6 +152,7 @@ class UR20ScrewEmbodiment:
             raise ValueError("action_amplification must be between 1.0 and 5.0")
         self.action_amplification = float(action_amplification)
         self._last_vision_confidence = 0.0
+        self._action_stream_alignment_locked = False
         self._last_vision_xy_error = np.zeros(2, dtype=float)
         self._last_screw_top_z_estimate = SCREW_TARGET.head_top_z_m
         self._last_screw_xy_estimate: np.ndarray | None = None
@@ -178,6 +179,7 @@ class UR20ScrewEmbodiment:
         self.task_success = False
         self.socket_seated = False
         self.socket_turn_completed = False
+        self.socket_turn_extraction_m = 0.0
         self.socket_turn_screw_delta = 0.0
         self.socket_turn_stop_reason: str | None = None
         self.max_screw_lift = 0.0
@@ -453,6 +455,7 @@ class UR20ScrewEmbodiment:
         self._last_axial_contact = self._has_axial_contact(data)
         self.socket_seated = False
         self.socket_turn_completed = False
+        self.socket_turn_extraction_m = 0.0
         self.socket_turn_screw_delta = 0.0
         self.socket_turn_stop_reason = None
         return self._observation(data, self.instruction, self.include_force,
@@ -541,6 +544,9 @@ class UR20ScrewEmbodiment:
                 self.physics_steps = int(data["steps"])
                 self._last_tool_tip = np.asarray(data["sites"]["tool_tip"], dtype=float)
                 self.socket_turn_completed = bool(data["socket_turn_state"][2])
+                self.socket_turn_extraction_m = float(
+                    data.get("socket_turn_extraction_m", self.socket_turn_extraction_m)
+                )
                 self.socket_turn_screw_delta = float(data.get("screw_rotation_delta", 0.0))
                 self.socket_turn_stop_reason = data.get("socket_turn_stop_reason")
                 if socket_turn_iterations % 20 == 0 or self.socket_turn_completed or self.socket_turn_stop_reason:
@@ -727,6 +733,7 @@ class UR20ScrewEmbodiment:
                                 "socket_engagement_stable": data["socket_engagement_stable"],
                                 "socket_seated": self.socket_seated,
                                 "socket_turn_completed": self.socket_turn_completed,
+                                "socket_turn_extraction_m": self.socket_turn_extraction_m,
                                 "socket_turn_screw_rotation_delta": self.socket_turn_screw_delta,
                                 "socket_turn_stop_reason": self.socket_turn_stop_reason,
                                 "socket_turn_sim_steps": socket_turn_iterations,
@@ -797,6 +804,18 @@ class UR20ScrewEmbodiment:
     def _has_axial_contact(data: dict[str, Any]) -> bool:
         force = np.asarray(data.get("force_torque_compensated", np.zeros(6)), dtype=float)
         return force.shape == (6,) and abs(float(force[2])) >= CONTACT_FORCE_THRESHOLD_N
+
+    def begin_action_stream(self) -> None:
+        """Capture the control phase before executing a bounded waypoint segment."""
+        self._action_stream_alignment_locked = bool(self._xy_alignment_locked)
+
+    def action_stream_should_commit(self) -> bool:
+        """End a streamed free-space segment when its control assumptions change."""
+        return (
+            self._last_axial_contact
+            or self._last_vision_confidence < VISION_XY_MOTION_MIN_CONFIDENCE
+            or self._xy_alignment_locked != self._action_stream_alignment_locked
+        )
 
     def _run_spiral_increment(self, target_force_n: float) -> dict[str, Any]:
         data = self._rpc({"op": "step", "target_position": self._last_tool_tip.tolist(),

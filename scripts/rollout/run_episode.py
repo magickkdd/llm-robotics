@@ -14,7 +14,7 @@ import numpy as np
 from ur20_screw.evaluation.video import encode_jpeg_frames
 from ur20_screw.policy.budget import BudgetTransport
 from ur20_screw.policy.client import UR20Policy
-from ur20_screw.control.actions import action_for
+from ur20_screw.control.actions import action_for, sequence_targets
 from ur20_screw.simulation.robot import UR20ScrewEmbodiment
 from ur20_screw.contracts import EmbodimentFault, Scene
 from ur20_screw.policy.tui import UR20Dashboard
@@ -122,6 +122,8 @@ def main() -> None:
     parser.add_argument("--max-output-tokens", type=int, default=8192)
     parser.add_argument("--request-timeout", type=float, default=300)
     parser.add_argument("--prior-learnings", type=Path)
+    parser.add_argument("--fused-action-stream", action="store_true",
+                        help="allow bounded, phase-guarded waypoint segments")
     parser.add_argument("--tui", action="store_true")
     viewer = parser.add_mutually_exclusive_group()
     viewer.add_argument("--mujoco-viewer", dest="mujoco_viewer", action="store_true",
@@ -201,6 +203,8 @@ def main() -> None:
         policy.enable_spiral_search()
     if args.twist_after_seating:
         policy.enable_socket_turn()
+    if args.fused_action_stream:
+        policy.enable_action_stream()
 
     console = UR20Dashboard(sys.stderr) if args.tui else None
     transcript = args.output / "transcript.jsonl"
@@ -221,6 +225,60 @@ def main() -> None:
             if name == "done":
                 stopped_by = "policy_done"
                 break
+            if name == "move_sequence":
+                try:
+                    waypoints = sequence_targets(arguments)
+                except ValueError as error:
+                    policy.tool_result(call_id, str(error))
+                    continue
+                sequence_results = []
+                sequence_observation = observation
+                robot.begin_action_stream()
+                try:
+                    for waypoint in waypoints:
+                        if robot.action_stream_should_commit():
+                            break
+                        action = action_for("move_to", {
+                            "targets": waypoint,
+                            "note": arguments["note"],
+                        }, sequence_observation)
+                        result = robot.step(action)
+                        sequence_observation = result.observation
+                        sequence_results.append(result.info)
+                        with actions_path.open("a", encoding="utf-8") as stream:
+                            stream.write(json.dumps({
+                                "tool": name, "arguments": arguments,
+                                "waypoint": waypoint,
+                                "state": {key: np.asarray(value).tolist()
+                                          for key, value in result.observation.state.items()},
+                                "info": result.info,
+                            }, ensure_ascii=False, default=json_default) + "\n")
+                        if robot.task_success or result.terminated:
+                            break
+                        if robot.action_stream_should_commit():
+                            break
+                    observation = sequence_observation
+                except (ValueError, EmbodimentFault) as error:
+                    observation = sequence_observation
+                    policy.tool_result(call_id, json.dumps(
+                        {"status": "partial", "error": str(error),
+                         "executed_waypoints": len(sequence_results)}, ensure_ascii=False))
+                    policy.observe(observation, robot.info.docs)
+                    continue
+                policy.tool_result(call_id, json.dumps({
+                    "status": "ok" if sequence_results else "phase_commit",
+                    "executed_waypoints": len(sequence_results),
+                    "phase_commit": robot.action_stream_should_commit(),
+                    "last_info": sequence_results[-1] if sequence_results else {},
+                }, default=json_default))
+                if robot.task_success:
+                    stopped_by = "environment_success"
+                    break
+                if sequence_results and result.terminated:
+                    stopped_by = result.termination_reason or "environment_terminated"
+                    break
+                policy.observe(observation, robot.info.docs)
+                continue
             try:
                 action = action_for(name, arguments, observation)
             except ValueError as error:
@@ -269,6 +327,7 @@ def main() -> None:
             "required_stable_physics_steps": 20,
             "max_screw_lift_m": robot.max_screw_lift,
             "calls": budget.calls,
+            "policy_turns": policy.calls,
             "sim_steps": robot.environment_steps,
             "physics_steps": robot.physics_steps,
             "spiral_internal_increments": robot.spiral_internal_increments,
@@ -279,10 +338,12 @@ def main() -> None:
             "spiral_search": args.spiral_search,
             "twist_after_seating": args.twist_after_seating,
             "socket_turn_completed": robot.socket_turn_completed,
+            "socket_turn_extraction_m": robot.socket_turn_extraction_m,
             "socket_turn_stop_reason": robot.socket_turn_stop_reason,
             "socket_turn_screw_rotation_delta_rad": robot.socket_turn_screw_delta,
             "required_screw_extraction_m": 0.021 if args.twist_after_seating else None,
             "action_amplification": args.action_amplification,
+            "fused_action_stream": args.fused_action_stream,
             "video_frames": video_frames,
             "video_fps": 20,
             "simulation_realtime_pacing": True,

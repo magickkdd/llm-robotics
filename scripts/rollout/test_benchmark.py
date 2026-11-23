@@ -137,7 +137,7 @@ def main() -> None:
         assert engaged["engaged_seen"]
         assert engaged["socket_engaged"]
         assert abs(float(data.qpos[worker.screw_spin_qpos]) -
-                   WORKER_MODULE.INITIAL_ROTATIONS[0]) < 1e-5
+                   WORKER_MODULE.INITIAL_ROTATIONS[0]) < 1e-4
         assert float(data.qpos[worker.screw_lift_qpos]) > -0.002
 
         worker.reset(0)

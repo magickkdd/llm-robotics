@@ -84,6 +84,29 @@ class UR20Policy:
             "turn_socket", "After stable tactile seating, run the bounded threaded screw extraction operation.",
             {"note": {"type": "string"}}, ["note"]))
 
+    def enable_action_stream(self) -> None:
+        self.system += (
+            " You may use move_sequence for up to four clear free-space waypoints. "
+            "The controller observes after every waypoint and interrupts the segment "
+            "at contact, uncertain vision, or an XY alignment phase change. Reassess "
+            "before continuing after an interruption.\n"
+        )
+        target = {
+            "type": "object",
+            "properties": {axis: {"type": "number"} for axis in ("x", "y", "z")},
+            "additionalProperties": False,
+        }
+        self.tools.append(_tool(
+            "move_sequence",
+            "Execute up to four absolute Cartesian waypoints as one free-space segment. "
+            "Use only for a clear approach before contact; the controller returns early "
+            "when contact, uncertain vision, or XY alignment changes the control phase.",
+            {"waypoints": {"type": "array", "minItems": 1, "maxItems": 4,
+                            "items": {"type": "object", "properties": {
+                                "targets": target,
+                            }, "required": ["targets"], "additionalProperties": False}},
+             "note": {"type": "string"}}, ["waypoints", "note"]))
+
     def observe(self, observation: Observation, robot_docs: str) -> None:
         if not self.input:
             self.system += "Robot operating notes:\n" + robot_docs

@@ -40,10 +40,13 @@ FORCE_ADMITTANCE_MAX_OFFSET_M = 0.005
 SOCKET_TURN_SPEED_RAD_S = 2.0
 SCREW_THREAD_PITCH_M = 0.001
 SCREW_EXTRACTION_DISTANCE_M = 0.021
-SOCKET_TURN_ANGLE_RAD = (
-    SCREW_EXTRACTION_DISTANCE_M / SCREW_THREAD_PITCH_M * 2.0 * np.pi
-)
 SOCKET_TURN_DIRECTION = -1.0
+
+
+def screw_extraction_completed(start_lift_m: float, current_lift_m: float) -> bool:
+    return current_lift_m - start_lift_m >= SCREW_EXTRACTION_DISTANCE_M
+
+
 SPIRAL_FORCE_DROP_THRESHOLD_N = 0.75
 SPIRAL_LATERAL_FORCE_RISE_THRESHOLD_N = 0.30
 SPIRAL_FORCE_TACTILE_LATERAL_RISE_THRESHOLD_N = 0.75
@@ -269,6 +272,7 @@ class Worker:
         self.socket_turn_active = False
         self.socket_turn_start_angle = 0.0
         self.socket_turn_start_screw_angle = 0.0
+        self.socket_turn_start_lift = 0.0
         self.socket_turn_completed = False
         self.osc_target_position = None
         self.osc_target_rotation = None
@@ -766,6 +770,7 @@ class Worker:
         self.socket_turn_active = False
         self.socket_turn_start_angle = float(self.data.qpos[self.socket_joint_qpos])
         self.socket_turn_start_screw_angle = float(self.data.qpos[self.screw_spin_qpos])
+        self.socket_turn_start_lift = float(self.data.qpos[self.screw_lift_qpos])
         self.socket_turn_completed = False
         self.spiral_search_active = False
         self.spiral_search_guarded = False
@@ -1124,6 +1129,7 @@ class Worker:
             self.socket_turn_completed = False
             self.socket_turn_start_angle = float(self.data.qpos[self.socket_joint_qpos])
             self.socket_turn_start_screw_angle = float(self.data.qpos[self.screw_spin_qpos])
+            self.socket_turn_start_lift = float(self.data.qpos[self.screw_lift_qpos])
             self.data.eq_active[self.screw_rotation_lock_id] = 0
             thread_lift_per_radian = SCREW_THREAD_PITCH_M / (2.0 * np.pi)
             self.model.eq_data[self.screw_thread_pitch_coupling_id, :2] = (
@@ -1155,16 +1161,21 @@ class Worker:
             socket_velocity=SOCKET_TURN_DIRECTION * SOCKET_TURN_SPEED_RAD_S,
             follow_screw_lift=True,
         )
-        elapsed_angle = float(self.data.qpos[self.socket_joint_qpos] - self.socket_turn_start_angle)
         force_peak = np.linalg.norm(np.asarray(result["force_torque_peak_compensated"][:3]))
         if force_peak >= 50.0:
             self._finish_socket_turn()
             result["socket_turn_stop_reason"] = "force_guard"
-        elif abs(elapsed_angle) >= SOCKET_TURN_ANGLE_RAD:
+        elif screw_extraction_completed(
+            self.socket_turn_start_lift,
+            float(self.data.qpos[self.screw_lift_qpos]),
+        ):
             self._finish_socket_turn(completed=True)
             result["socket_turn_stop_reason"] = "screw_extracted"
         else:
             result["socket_turn_stop_reason"] = None
+        result["socket_turn_extraction_m"] = (
+            float(self.data.qpos[self.screw_lift_qpos]) - self.socket_turn_start_lift
+        )
         result["socket_turn_state"] = [
             float(self.socket_turn_active),
             float(self.data.qpos[self.socket_joint_qpos] - self.socket_turn_start_angle),

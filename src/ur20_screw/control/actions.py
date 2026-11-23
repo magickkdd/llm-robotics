@@ -9,6 +9,28 @@ import numpy as np
 from ur20_screw.contracts import Action, Observation
 
 
+def sequence_targets(arguments: dict[str, Any]) -> list[dict[str, float]]:
+    """Validate the bounded waypoint segment used by the action-stream tool."""
+    note = arguments.get("note")
+    waypoints = arguments.get("waypoints")
+    if not isinstance(note, str) or not note.strip():
+        raise ValueError("note is required; no simulation step was advanced")
+    if not isinstance(waypoints, list) or not 1 <= len(waypoints) <= 4:
+        raise ValueError("waypoints must contain between one and four targets")
+    validated = []
+    for waypoint in waypoints:
+        targets = waypoint.get("targets") if isinstance(waypoint, dict) else None
+        if not isinstance(targets, dict) or not targets:
+            raise ValueError("each waypoint must contain one or more of x, y, z")
+        if set(targets) - {"x", "y", "z"}:
+            raise ValueError("waypoint targets may contain only x, y, z")
+        values = {axis: float(value) for axis, value in targets.items()}
+        if not np.isfinite(list(values.values())).all():
+            raise ValueError("waypoint coordinates must be finite")
+        validated.append(values)
+    return validated
+
+
 def action_for(name: str, arguments: dict[str, Any], observation: Observation) -> Action | None:
     current = np.asarray(observation.state["eef_pos"], dtype=float)
     if name == "move_to":

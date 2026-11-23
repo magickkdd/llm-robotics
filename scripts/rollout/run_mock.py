@@ -38,9 +38,13 @@ def main() -> None:
         if "error" in initial:
             raise RuntimeError(initial["error"])
         print("reset:", initial["sites"])
-        # Keep the robot at its keyframe and rotate the socket to exercise the
-        # screw-spin -> screw-lift equality, without calling an LLM.
-        result = request(process, {"op": "step", "ctrl": [*initial["qpos"][:6], 0.0], "count": 200})
+        # Hold the tool at its reset pose while rotating the socket actuator.
+        result = request(process, {
+            "op": "step",
+            "target_position": initial["sites"]["tool_tip"],
+            "socket_velocity": -1.0,
+            "count": 200,
+        })
         if "error" in result:
             raise RuntimeError(result["error"])
         print("after socket rotation:", result["sites"])

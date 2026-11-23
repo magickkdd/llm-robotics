@@ -23,6 +23,8 @@ def main() -> None:
     parser.add_argument("--force-feedback", action="store_true")
     parser.add_argument("--compliant-control", action="store_true")
     parser.add_argument("--spiral-search", action="store_true")
+    parser.add_argument("--fused-action-stream", action="store_true",
+                        help="enable bounded, phase-guarded waypoint segments")
     parser.add_argument("--execute-paid-rollouts", action="store_true", required=True)
     args = parser.parse_args()
     if args.compliant_control and not args.force_feedback:
@@ -50,6 +52,8 @@ def main() -> None:
             command.append("--compliant-control")
         if args.spiral_search:
             command.append("--spiral-search")
+        if args.fused_action_stream:
+            command.append("--fused-action-stream")
         print(f"\n[{state_id + 1}/10] state{state_id:02d}", flush=True)
         result = subprocess.run(command, cwd=ROOT, check=False)
         if result.returncode:
